@@ -1,6 +1,7 @@
 
 from dataclasses import dataclass
 
+
 @dataclass
 class GeoBounds:
     """Geographic bounding box for the area of interest"""

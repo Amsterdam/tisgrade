@@ -38,12 +38,32 @@ from psycopg2 import sql
 from psycopg2.extras import execute_values
 # from shapely.geometry import Point
 import geopandas as gpd
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+import logging
 
 import tisgrade_classes as tsgc
-from tisgrade_config import DB_SCHEMA, OUT_TABLE_CENTRIOD, OUT_TABLE_LINE
-from tisgrade_config import PANORAMAX_END_POINT, USERNAME
+# from tisgrade_config import DB_SCHEMA, OUT_TABLE_CENTRIOD, OUT_TABLE_LINE
+# from tisgrade_config import PANORAMAX_END_POINT, USERNAME
 
-import logging
+load_dotenv()
+
+# env_path = Path(__file__).resolve().parent / ".env"
+
+# print("Loading .env from:", env_path)
+# print(".env exists:", env_path.exists())
+
+
+DB_SCHEMA           = os.environ["DB_SCHEMA"]
+OUT_TABLE_CENTRIOD  = os.environ["OUT_TABLE_CENTRIOD"]
+OUT_TABLE_LINE      = os.environ["OUT_TABLE_LINE"]
+
+PANORAMAX_END_POINT = os.environ["PANORAMAX_END_POINT"]
+USERNAME            = os.environ["USERNAME"]
+
+
+
 logger = logging.getLogger(f"tisgrade.{__name__}")
  
 # ---------------------------------------------------------------------------

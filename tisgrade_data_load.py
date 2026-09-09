@@ -10,15 +10,27 @@ Dependencies
 import json
 import re
 from typing import List, Tuple, Optional, Union, Dict, Any
+import os
+
  
 # Third-party
 import psycopg2.sql as sql
 
 from shapely import wkb, wkt
 
-from tisgrade_config import DB_SCHEMA, IN_TABLE_PHOTO, IN_TABLE_SIGNS, IN_TABLE_SEMANTICS, TEMP_TABLE
-
+# from tisgrade_config import DB_SCHEMA, IN_TABLE_PHOTO, IN_TABLE_SIGNS, IN_TABLE_SEMANTICS, TEMP_TABLE
+from dotenv import load_dotenv
 import logging
+
+load_dotenv()
+
+DB_SCHEMA           = os.environ["DB_SCHEMA"]
+IN_TABLE_PHOTO      = os.environ["IN_TABLE_PHOTO"]
+IN_TABLE_SIGNS      = os.environ["IN_TABLE_SIGNS"]
+IN_TABLE_SEMANTICS  = os.environ["IN_TABLE_SEMANTICS"]
+TEMP_TABLE          = os.environ["TEMP_TABLE"]
+
+
 logger = logging.getLogger(f"tisgrade.{__name__}")
 
  

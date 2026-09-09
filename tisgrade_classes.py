@@ -8,7 +8,8 @@ from sklearn.metrics.pairwise import haversine_distances
 from haversine import haversine
 from scipy.stats import circmean
 from shapely import STRtree, GeometryType
-from tisgrade_config import EARTH_RADIUS_M, PANORAMAX_END_POINT
+import os
+# from tisgrade_config import EARTH_RADIUS_M, PANORAMAX_END_POINT
 
 import geopandas as gpd
 from shapely.ops import transform
@@ -17,6 +18,14 @@ import pyproj
 from sklearn.cluster import DBSCAN
 
 import logging
+from dotenv import load_dotenv
+
+load_dotenv()
+
+EARTH_RADIUS_M      = int(os.environ["EARTH_RADIUS_M"])
+PANORAMAX_END_POINT = os.environ["PANORAMAX_END_POINT"]
+
+
 logger = logging.getLogger(f"tisgrade.{__name__}")
 
 

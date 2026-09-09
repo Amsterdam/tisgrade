@@ -13,6 +13,8 @@ def get_db_connection () -> "psycopg2.extensions.connection":
         f"@{_host}:{_port}/{_database}"
     )
 
+    print(f"_conn_string: {_conn_string}")
+
     logger.info("Connecting to database")
     pg_connection = psycopg2.connect(
         _conn_string,
@@ -299,6 +301,7 @@ if __name__ == "__main__":
     import os
     from pathlib import Path
     import logging
+    from dotenv import load_dotenv
     
     
     # Third-party
@@ -312,16 +315,34 @@ if __name__ == "__main__":
     import tisgrade_data_store as tsg_ds 
 
     # config information
-    from tisgrade_config import STORE_GEO_PACK, OUTPUT_DIR_GEO_PACK
-    from tisgrade_config import USERNAME, HOST, PORT, DB, TOKEN_PATH
-    from tisgrade_config import KEEPALIVES, KEEPALIVES_IDLE, KEEPALIVES_INTERVAL, KEEPALIVES_COUNT
+    # from tisgrade_config import STORE_GEO_PACK, OUTPUT_DIR_GEO_PACK
+    # from tisgrade_config import USERNAME, HOST, PORT, DB, TOKEN_PATH
+    # from tisgrade_config import KEEPALIVES, KEEPALIVES_IDLE, KEEPALIVES_INTERVAL, KEEPALIVES_COUNT
     # from tisgrade_config import setup_logging
 
     # For development (shows debug and info messages in console)
     # logger = setup_logging(debug=True)
     
     # For production (only writes to log file)
-    logger = setup_logging(debug=False)
+
+    load_dotenv()
+
+    STORE_GEO_PACK          = STORE_GEO_PACK = os.environ["STORE_GEO_PACK"].lower() == "true"
+    OUTPUT_DIR_GEO_PACK     = Path(os.environ["OUTPUT_DIR_GEO_PACK"])
+
+    USERNAME                = os.environ["DB_USERNAME"]
+    HOST                    = os.environ["HOST"]
+    PORT                    = os.environ["PORT"]
+    DB                      = os.environ["DB"]
+    TOKEN_PATH              = Path(os.environ["TOKEN_PATH"])
+
+    KEEPALIVES              = int(os.environ["KEEPALIVES"])
+    KEEPALIVES_IDLE         = int(os.environ["KEEPALIVES_IDLE"])
+    KEEPALIVES_INTERVAL     = int(os.environ["KEEPALIVES_INTERVAL"])
+    KEEPALIVES_COUNT        = int(os.environ["KEEPALIVES_COUNT"])
+
+
+    logger = setup_logging(debug=True)
 
     try:
         logger.info("Application started")

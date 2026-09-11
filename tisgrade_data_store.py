@@ -1,129 +1,86 @@
-
-"""
-sign_detection.py
------------------
-Utilities for detecting and geolocating traffic signs from panoramic street-level
-imagery (e.g. Panoramax).
- 
-High-level pipeline
--------------------
-1. For each annotated sign in a panoramic image, compute a *bearing line*: a
-   ray cast from the camera position in the direction of the sign.
-2. Intersect bearing lines from different viewpoints. Each intersection is a
-   candidate sign location.
-3. Cluster intersections with DBSCAN (recursive, with adaptive epsilon) to
-   separate distinct signs from noise.
-4. Score each cluster by spatial density,the ratio of observed intersections
-   to the theoretical maximum and the amount of points in te cluster
-   Then resolve line-ownership conflicts bases on this score so that
-   each bearing line is assigned to at most one sign.
-5. Compute a centroid, estimated physical sign size, and viewing direction for every
-   accepted cluster.
-6. Persist results to a PostGIS database and/or GeoPackage files.
- 
-Dependencies
-------------
-    numpy, pandas, geopandas, shapely, scipy, scikit-learn,
-    geopy, haversine, psycopg2
-"""
- 
 # Standard library
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple, Optional, Union, Dict, Any
-import pandas as pd
- 
-# Third-party
-from psycopg2 import sql
-from psycopg2.extras import execute_values
-# from shapely.geometry import Point
-import geopandas as gpd
-import os
-from pathlib import Path
-from dotenv import load_dotenv
 import logging
 
+# Third-party
+import geopandas as gpd
+from psycopg2 import sql
+from psycopg2.extras import execute_values
+
+# Local
+import tisgrade_config as tsgcf
 import tisgrade_classes as tsgc
-# from tisgrade_config import DB_SCHEMA, OUT_TABLE_CENTRIOD, OUT_TABLE_LINE
-# from tisgrade_config import PANORAMAX_END_POINT, USERNAME
-
-load_dotenv()
-
-# env_path = Path(__file__).resolve().parent / ".env"
-
-# print("Loading .env from:", env_path)
-# print(".env exists:", env_path.exists())
 
 
-DB_SCHEMA           = os.environ["DB_SCHEMA"]
-OUT_TABLE_CENTRIOD  = os.environ["OUT_TABLE_CENTRIOD"]
-OUT_TABLE_LINE      = os.environ["OUT_TABLE_LINE"]
-
-PANORAMAX_END_POINT = os.environ["PANORAMAX_END_POINT"]
-USERNAME            = os.environ["USERNAME"]
-
-
-
+# Module-level logger.
+# This creates a logger name like: tisgrade.tisgrade_data_store
 logger = logging.getLogger(f"tisgrade.{__name__}")
  
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
- 
-# EARTH_RADIUS_M = 6_367_445  # Mean Earth radius in metres (used for unit conversions)
- 
-# Output directory for local GeoPackage exports.
-# OUTPUT_DIR = Path(
-#     r"C:\Users\postma032\OneDrive - Gemeente Amsterdam"
-#     r"\VOR - KenK - Onderzoek en Kennis-Projecten 2021-2025 - Projecten 2021-2025"
-#     r"\2026\269999 Team OMA\2026-02-19 Tisgrade GOM-846"
-# )
-
-# OUTPUT_DIR = Path(
-#     r"C:\Users\joost\Documents\amsterdam\tisgrade\2026-05-01 solve line problem"
-# )
 
 # ===========================================================================
 # Database persistence
 # ===========================================================================
  
-# def write_cluster_to_db(cur, clusters: list[dict], sign_code: str) -> None:
 def write_centriod_to_db(cur, lst_centroid: list[tsgc.Centroid], sign_code: str, start_timestamp: str, end_timestamp: str, run_name: str = '') -> None:
 
-    """Persist sign location clusters (and their source lines) to PostGIS.
- 
-    All inserts are wrapped in a single transaction; on any error the
-    transaction is rolled back and the exception is re-raised.
- 
+    """
+    Persist calculated centroid locations and their source bearing lines to PostGIS.
+
+    The function writes two types of records:
+    1. Object locations / centroids.
+    2. Bearing lines that contributed to those centroids.
+
+    All database writes are wrapped in a single transaction.
+    If an error occurs, the transaction is rolled back and the exception is raised.
+
     Parameters
     ----------
     cur:
-        An open psycopg2 cursor.
-    clusters:
-        List of centroid dicts as returned by :func:`cluster_data`.
+        Open psycopg2 cursor.
+
+    lst_centroid:
+        List of Centroid objects to write.
+
     sign_code:
-        RVV sign code used to tag the inserted records (e.g. ``"B6"``).
+        Traffic sign code used to tag the inserted records.
+
+    start_timestamp:
+        Start timestamp of the input data period.
+
+    end_timestamp:
+        End timestamp of the input data period.
+
+    run_name:
+        Optional name for this run.
     """
+
+    # If cur is explicitly False, do nothing.
     if cur==False:
         return
     
+    # If there are no centroids to write, do nothing.
     if not lst_centroid:
         return
  
-    # timestamp = datetime.now(timezone.utc)
+    # Timestamp for this write/run.
     timestamp = datetime.now().astimezone()
  
     try:
+        # Start an explicit transaction.
         cur.execute("BEGIN")
  
         # ------------------------------------------------------------------ #
         # Insert sign locations
         # ------------------------------------------------------------------ #
+
+        # Build rows for the centroid/output location table.
+        # Each tuple matches the column order in the INSERT statement below.
         location_values = [
             (
                 sign_code,
-                centriod.get_center().y, #latitude
-                centriod.get_center().x, #longitude
+                centriod.get_center().y, # latitude
+                centriod.get_center().x, # longitude
                 centriod.get_object_size(),
                 centriod.get_perpendicular(),
                 timestamp,
@@ -131,37 +88,31 @@ def write_centriod_to_db(cur, lst_centroid: list[tsgc.Centroid], sign_code: str,
                 start_timestamp,
                 end_timestamp,
                 run_name,
-                USERNAME
+                tsgcf.USERNAME
             )
             for centriod in lst_centroid
         ]
 
+        # Build INSERT query for centroid locations.
+        # Schema and table names are safely inserted as SQL identifiers.
         insert_query = sql.SQL (
             """INSERT INTO {schema}.{table}
                     (object, latitude, longitude, size, direction, run_timestamp, location, period_start, period_end, run_name, run_user)
                 VALUES %s
             """).format(
-                schema = sql.Identifier(DB_SCHEMA),
-                table = sql.Identifier(OUT_TABLE_CENTRIOD)
+                schema = sql.Identifier(tsgcf.DB_SCHEMA),
+                table = sql.Identifier(tsgcf.OUT_TABLE_CENTRIOD)
         )
- 
-        # insert_query(
-        #     cur,
-        #     """
-        #     INSERT INTO "20260220_jp_tisgrade".out_object_location_panoramax
-        #         (object, latitude, longitude, size, direction, run_timestamp, location, period_start, period_end, run_name)
-        #     VALUES %s
-        #     """,
-        #     location_values,
-        # )
 
+        # Bulk insert all centroid location rows.
         execute_values(
             cur,
             insert_query,
             location_values
         )  
  
-        # Retrieve the auto-generated IDs in insertion order
+        # Retrieve the auto-generated IDs in insertion order.
+        # These IDs are needed to link bearing lines to their centroid location.
         query = sql.SQL (
             """
                 SELECT id
@@ -169,23 +120,15 @@ def write_centriod_to_db(cur, lst_centroid: list[tsgc.Centroid], sign_code: str,
                 WHERE object = %s AND run_timestamp = %s
                 ORDER BY id
             """).format(
-                schema = sql.Identifier(DB_SCHEMA),
-                table = sql.Identifier(OUT_TABLE_CENTRIOD)
+                schema = sql.Identifier(tsgcf.DB_SCHEMA),
+                table = sql.Identifier(tsgcf.OUT_TABLE_CENTRIOD)
         )
-        
 
-        # cur.execute(
-        #     """
-        #     SELECT id
-        #     FROM "20260220_jp_tisgrade".out_object_location_panoramax
-        #     WHERE object = %s AND run_timestamp = %s
-        #     ORDER BY id
-        #     """,
-        #     (sign_code, timestamp),
-        # )
+        # Fetch IDs of the centroids just inserted.
         cur.execute(query, (sign_code, timestamp))
         location_ids = [row[0] for row in cur.fetchall()]
  
+        # Check that every inserted centroid has a matching generated ID.
         if len(location_ids) != len(lst_centroid):
             raise ValueError(
                 f"Expected {len(lst_centroid)} location IDs, got {len(location_ids)}."
@@ -195,6 +138,8 @@ def write_centriod_to_db(cur, lst_centroid: list[tsgc.Centroid], sign_code: str,
         # Insert bearing lines
         # ------------------------------------------------------------------ #
 
+        # Build rows for the line output table.
+        # Each line belongs to one centroid location through object_location_id.
         line_values = [
             (
                 location_ids[cluster_idx],
@@ -218,6 +163,8 @@ def write_centriod_to_db(cur, lst_centroid: list[tsgc.Centroid], sign_code: str,
             for obj_ann in centriod.get_lst_object_annotation()
         ]
 
+        # Build INSERT query for source bearing lines.
+        # Schema and table names are safely inserted as SQL identifiers.
         insert_query = sql.SQL ("""
             INSERT INTO {schema}.{table} (
                 object_location_id,
@@ -239,21 +186,26 @@ def write_centriod_to_db(cur, lst_centroid: list[tsgc.Centroid], sign_code: str,
             )
             VALUES %s
             """).format(
-                schema = sql.Identifier(DB_SCHEMA),
-                table = sql.Identifier(OUT_TABLE_LINE)
+                schema = sql.Identifier(tsgcf.DB_SCHEMA),
+                table = sql.Identifier(tsgcf.OUT_TABLE_LINE)
         )
 
-        # Execute bulk insert
+
+        # Execute bulk insert for all bearing line rows.
         execute_values(
             cur,
             insert_query,
             line_values
         )     
  
+        # Commit the transaction when both inserts succeeded.
         cur.connection.commit()
  
     except Exception as exc:
+        # Roll back the full transaction if any part fails.
         cur.connection.rollback()
+
+        # Raise a clearer error while keeping the original exception context.
         raise RuntimeError(f"Database write failed: {exc}") from exc
  
  
@@ -261,16 +213,19 @@ def write_centriod_to_db(cur, lst_centroid: list[tsgc.Centroid], sign_code: str,
 # GeoPackage export helpers
 # ===========================================================================
  
-def write_to_gpkg_lines(OUTPUT_DIR, lst_object_annotation: list[tsgc.ObjectAnnotation]) -> None:
-    """Append bearing lines to ``lines_01.gpkg`` in :data:`OUTPUT_DIR`.
- 
+def write_to_gpkg_lines(lst_object_annotation: list[tsgc.ObjectAnnotation]) -> None:
+    """
+    Append bearing lines to lines_01.gpkg.
+
+    Each ObjectAnnotation contributes one line geometry and related metadata.
+
     Parameters
     ----------
-    lines:
-        List of bearing-line dicts containing ``"line"`` (Shapely LineString),
-        ``"sign_code"``, ``"scan_direction"``, ``"annotation_id"``,
-        and ``"picture_id"``.
+    lst_object_annotation:
+        List of ObjectAnnotation objects whose lines should be written.
     """
+
+    # Create a GeoDataFrame from all object annotation lines.
     gdf = gpd.GeoDataFrame(
         [
             {
@@ -278,33 +233,40 @@ def write_to_gpkg_lines(OUTPUT_DIR, lst_object_annotation: list[tsgc.ObjectAnnot
                 "sign_code": object_annotation.get_object_code(),
                 "line_index": object_annotation.get_id(),
                 "scan_direction": object_annotation.direction_deg(),
-                # f"?annot={line['annotation_id']}&pic={line['picture_id']}"
                 "link": (
-                    f"{PANORAMAX_END_POINT}"                    
+                    f'{tsgcf.PANORAMAX_END_POINT}'
                     f"?annot={object_annotation.get_object_annotation_id()}&pic={object_annotation.get_picture_id()}"
                 ),
             }
             for object_annotation in lst_object_annotation
         ],
         crs="EPSG:4326",
-    )
-    output_path = OUTPUT_DIR / "lines_01.gpkg"
+    )  
+
+    # Write to the configured GeoPackage output directory.
+    output_path = Path(tsgcf.OUTPUT_DIR_GEO_PACK) / "lines_01.gpkg"
+
+    # Append if the file already exists, otherwise create a new file.
     mode = "a" if output_path.exists() else "w"
+
+    # Write the GeoDataFrame to the "lines" layer.
     gdf.to_file(output_path, layer="lines", driver="GPKG", mode=mode)
  
  
-def write_to_gpkg_intersection(OUTPUT_DIR, lst_intersection: list[tsgc.Intersection], sign_type: str) -> None:
-    """Append all intersection points to ``intersections_03.gpkg``.
- 
+def write_to_gpkg_intersection(lst_intersection: list[tsgc.Intersection], sign_type: str) -> None:
+    """
+    Append all intersection points to intersections_03.gpkg.
+
     Parameters
     ----------
-    intersection:
-        List of intersection dicts with keys ``"point"``,
-        ``"angle_scan_directions"``, ``"sign_size_average_m"``,
-        and ``"sign_size_score"``.
+    lst_intersection:
+        List of Intersection objects to write.
+
     sign_type:
-        Sign code used to tag the records.
+        Traffic sign code used to tag the records.
     """
+
+    # Create a GeoDataFrame from all intersection points.
     gdf = gpd.GeoDataFrame(
         [
             {
@@ -318,22 +280,31 @@ def write_to_gpkg_intersection(OUTPUT_DIR, lst_intersection: list[tsgc.Intersect
         ],
         crs="EPSG:4326",
     )
-    output_path = OUTPUT_DIR / "intersections_03.gpkg"
+
+    # Write to the configured GeoPackage output directory.
+    output_path = tsgcf.OUTPUT_DIR_GEO_PACK / "intersections_03.gpkg"
+
+    # Append if the file already exists, otherwise create a new file.
     mode = "a" if output_path.exists() else "w"
+
+    # Write the GeoDataFrame to the "intersections" layer.
     gdf.to_file(output_path, layer="intersections", driver="GPKG", mode=mode)
  
  
-def write_to_gpkg_intersection_reliable(OUTPUT_DIR, lst_intersection: list[tsgc.Intersection], sign_type: str) -> None:
-    """Append high-confidence intersection points to ``intersections_reliable_03.gpkg``.
- 
+def write_to_gpkg_intersection_reliable(lst_intersection: list[tsgc.Intersection], sign_type: str) -> None:
+    """
+    Append high-confidence or filtered intersection points to intersections_reliable_03.gpkg.
+
     Parameters
     ----------
-    intersection:
-        Same structure as the *intersection* parameter in
-        :func:`write_to_gpkg_intersection`.
+    lst_intersection:
+        List of Intersection objects to write.
+
     sign_type:
-        Sign code used to tag the records.
+        Traffic sign code used to tag the records.
     """
+
+    # Create a GeoDataFrame from the reliable intersection points.
     gdf = gpd.GeoDataFrame(
         [
             {
@@ -347,26 +318,33 @@ def write_to_gpkg_intersection_reliable(OUTPUT_DIR, lst_intersection: list[tsgc.
         ],
         crs="EPSG:4326",
     )
-    output_path = OUTPUT_DIR / "intersections_reliable_03.gpkg"
+
+    # Write to the configured GeoPackage output directory.
+    output_path = tsgcf.OUTPUT_DIR_GEO_PACK / "intersections_reliable_03.gpkg"
+
+    # Append if the file already exists, otherwise create a new file.
     mode = "a" if output_path.exists() else "w"
+
+    # Write the GeoDataFrame to the "intersections_reliable" layer.
     gdf.to_file(output_path, layer="intersections_reliable", driver="GPKG", mode=mode)
  
  
-def write_to_gpkg_clusters(OUTPUT_DIR, lst_cluster: list[tsgc.Cluster], sign_type: str) -> None:
-    """Append all cluster points (before filtering) to ``all_clusters_all_points_all_01.gpkg``.
- 
+def write_to_gpkg_clusters(lst_cluster: list[tsgc.Cluster], sign_type: str) -> None:
+    """
+    Append cluster centre points to clusters.gpkg.
+
+    This writes one point per Cluster, using the calculated cluster centre.
+
     Parameters
     ----------
-    OUTPUT_DIR:
-        Directory where the GeoPackage will be written.
-    lst_centroid:
-        List of Centroid objects to be written.
-    object_code:
-        Sign code to be included in the output.
-    csv_file_loc:
-        Optional directory where the CSV file will be written.
-        If None, no CSV will be written.
+    lst_cluster:
+        List of Cluster objects to write.
+
+    sign_type:
+        Traffic sign code used to tag the records.
     """
+
+    # Build rows for the GeoDataFrame.
     rows = [
         {
             "geometry": cluster.get_center(),
@@ -376,61 +354,77 @@ def write_to_gpkg_clusters(OUTPUT_DIR, lst_cluster: list[tsgc.Cluster], sign_typ
         for cluster in lst_cluster
         # for item in items
     ]
+
+    # Create a GeoDataFrame with WGS84 coordinates.
     gdf = gpd.GeoDataFrame(rows, crs="EPSG:4326")
-    output_path = OUTPUT_DIR / "clusters.gpkg"
+
+    # Write to the configured GeoPackage output directory.
+    output_path = tsgcf.OUTPUT_DIR_GEO_PACK / "clusters.gpkg"
+
+    # Append if the file already exists, otherwise create a new file.
     mode = "a" if output_path.exists() else "w"
+
+    # Write the GeoDataFrame to the "cluster" layer.
     gdf.to_file(output_path, layer="cluster", driver="GPKG", mode=mode)
  
  
 def write_to_gpkg_centriods(
-    OUTPUT_DIR,
     lst_centroid: list[tsgc.Centroid],
-    object_code: str,
-    csv_file_loc: Path | None = None
+    object_code: str
 ) -> None:
-    """Write centroids to a GeoPackage and optionally to a CSV file.
+    """
+    Write centroids and their related lines to GeoPackage files.
 
+    This function writes two files:
+    1. centriods.gpkg:
+       Contains the centroid point locations.
+
+    2. centriod_lines.gpkg:
+       Contains the source ObjectAnnotation lines assigned to the centroids.
 
     Parameters
     ----------
     lst_centroid:
         List of Centroid objects to be written.
+
     object_code:
-        Sign code to be included in the output.
+        Traffic sign code to include in the output.
     """
 
+    # Build rows for centroid point output.
     data = [
         {
             "geometry": centroid.get_center(),
             "sign_code": object_code,
             "sign_size": centroid.get_object_size(),
-            # "line_index": centroid.get_id(),
             "scan_direction": centroid.get_perpendicular(),
             "link": (
-                # f"https://nl.panoramax.xyz/"
-                f"{PANORAMAX_END_POINT}"
+                f'{tsgcf.PANORAMAX_END_POINT}'
                 f"?annot={centroid.get_object_annotation_id()}&pic={centroid.get_picture_id()}"
             ),
         }
         for centroid in lst_centroid
     ]
 
-    # Write to GeoPackage
+    # Write centroid points to GeoPackage.
     gdf = gpd.GeoDataFrame(data, crs="EPSG:4326")
-    output_path_gpkg = OUTPUT_DIR / "centriods.gpkg"
+    output_path_gpkg = tsgcf.OUTPUT_DIR_GEO_PACK / "centriods.gpkg"
+
+    # Append if the file already exists, otherwise create a new file.
     mode = "a" if output_path_gpkg.exists() else "w"
+
+    # Write the GeoDataFrame to the "centroid" layer.
     gdf.to_file(output_path_gpkg, layer="centroid", driver="GPKG", mode=mode)    
 
+    # Build rows for the lines assigned to each centroid.
     data = [
         {
             "geometry": anno.get_line(),
             "sign_code": anno.get_object_code(),
             "centriod_id": centroid.get_id(),
-            # "line_index": centroid.get_id(),
             "scan_direction": anno.direction_deg(),
             "link": (
-                # f"https://nl.panoramax.xyz/"
-                f"{PANORAMAX_END_POINT}"
+                f'{tsgcf.PANORAMAX_END_POINT}'
                 f"?annot={anno.get_object_annotation_id()}&pic={anno.get_picture_id()}"
             ),
         } 
@@ -438,48 +432,40 @@ def write_to_gpkg_centriods(
         for anno in centroid.get_lst_object_annotation()
     ]
 
-    # Write to GeoPackage
+    # Write centroid source lines to GeoPackage.
     gdf = gpd.GeoDataFrame(data, crs="EPSG:4326")
-    output_path_gpkg = OUTPUT_DIR / "centriod_lines.gpkg"
+    output_path_gpkg = tsgcf.OUTPUT_DIR_GEO_PACK / "centriod_lines.gpkg"
+
+    # Append if the file already exists, otherwise create a new file.
     mode = "a" if output_path_gpkg.exists() else "w"
+
+    # Write the GeoDataFrame to the "centroid_lines" layer.
     gdf.to_file(output_path_gpkg, layer="centroid_lines", driver="GPKG", mode=mode)    
 
 
 
-    # Selecteer alle kolommen behalve de originele geometrie
-    
-    # Bepaal CSV-bestandspad
-    if csv_file_loc is not None:
-        # output_path_csv =csv_file_loc / "clean_centriods_test.csv"
-        output_path_csv = OUTPUT_DIR / "centriods.csv"
-        # Converteer geometrie naar losse kolommen
-        gdf['x'] = gdf.geometry.x
-        gdf['y'] = gdf.geometry.y
-        df = gdf.drop(columns='geometry')
+def old_write_to_gpkg_clean_centriod(centroid_lines: list[dict]=None, sign_code:str=None) -> None:
+    """
+    Append older-style centroid records to clean_centriods.gpkg.
 
-        # Schrijf naar CSV
-        mode = "a" if output_path_csv.exists() else "w"
-        header = not output_path_csv.exists()
-        df.to_csv(output_path_csv, mode=mode, header=header, index=False)
+    This function appears to support an older data structure where centroids are
+    stored as dictionaries instead of Centroid objects.
 
-
-def old_write_to_gpkg_clean_centriod(OUTPUT_DIR=None, centroid_lines: list[dict]=None, sign_code:str=None, csv_file_loc: Optional[Union[str, Path]] = None) -> None:
-# def write_to_gpkg_clusters_center(OUTPUT_DIR, cluster_center: list[dict], sign_type: str) -> None:
-    """Append cluster centroid records to ``clean_centriod.gpkg``.
- 
     Parameters
     ----------
-    cluster_center:
-        List of centroid dicts as returned by :func:`cluster_data`.
-    sign_type:
-        Sign code used to tag the records.
+    centroid_lines:
+        List of centroid dictionaries.
+
+    sign_code:
+        Traffic sign code used to tag the records.
     """
+
+    # Create a GeoDataFrame from dictionary-based centroid data.
     gdf = gpd.GeoDataFrame(
         [
             {
                 "geometry": cluster["point"],
                 "sign_code": sign_code,
-                # "count": row["count"],
                 "count": len(cluster["nearby_lines"]),
                 "cluster_label": cluster["cluster_label"],
                 "direction": cluster["direction"],
@@ -492,20 +478,16 @@ def old_write_to_gpkg_clean_centriod(OUTPUT_DIR=None, centroid_lines: list[dict]
         ],
         crs="EPSG:4326",
     )
-    output_path = OUTPUT_DIR / "clean_centriods.gpkg"
+
+    # Write to the configured GeoPackage output directory.
+    output_path = tsgcf.OUTPUT_DIR_GEO_PACK / "clean_centriods.gpkg"
+
+    # Append if the file already exists, otherwise create a new file.
     mode = "a" if output_path.exists() else "w"
+
+    # Write the GeoDataFrame to the "cluster_center" layer.
     gdf.to_file(output_path, layer="cluster_center", driver="GPKG", mode=mode)
 
-    # Converteer geometrie naar losse kolommen
+    # Convert geometry coordinates to separate x and y columns.
     gdf['x'] = gdf.geometry.x
     gdf['y'] = gdf.geometry.y
-
-    # Selecteer alle kolommen behalve de originele geometrie
-    
-    # Bepaal CSV-bestandspad
-    if csv_file_loc:
-        output_path_csv =csv_file_loc / "clean_centriods_test.csv"
-        df = gdf.drop(columns='geometry')
-        # Schrijf naar CSV
-        df.to_csv(output_path_csv, index=False)
-

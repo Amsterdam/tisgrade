@@ -1,55 +1,74 @@
-"""
-tisgrade_data_laod.py
-
-Dependencies
-------------
-    psycopg2
-"""
- 
 # Standard library
 import json
-import re
-from typing import List, Tuple, Optional, Union, Dict, Any
-import os
+import logging
+from typing import List, Tuple, Dict, Any
 
- 
 # Third-party
 import psycopg2.sql as sql
+from shapely import wkt
 
-from shapely import wkb, wkt
-
-# from tisgrade_config import DB_SCHEMA, IN_TABLE_PHOTO, IN_TABLE_SIGNS, IN_TABLE_SEMANTICS, TEMP_TABLE
-from dotenv import load_dotenv
-import logging
-
-load_dotenv()
-
-DB_SCHEMA           = os.environ["DB_SCHEMA"]
-IN_TABLE_PHOTO      = os.environ["IN_TABLE_PHOTO"]
-IN_TABLE_SIGNS      = os.environ["IN_TABLE_SIGNS"]
-IN_TABLE_SEMANTICS  = os.environ["IN_TABLE_SEMANTICS"]
-TEMP_TABLE          = os.environ["TEMP_TABLE"]
+# Local
+import tisgrade_config as tsgcf
 
 
+# Module-level logger.
+# This creates a logger name like: tisgrade.tisgrade_data_load
 logger = logging.getLogger(f"tisgrade.{__name__}")
 
  
 # ===========================================================================
-# Database queries
-# ===========================================================================
- 
-
-# ===========================================================================
-# tem data set
+# Create temporary data set
 # ===========================================================================
 
 def create_temp_dataset(cursor: str, 
                 longitude_min: float, longitude_max: float, latitude_min: float, latitude_max: float,
                 start_date: str, end_date: str,
                 sign_regex: str) -> None:
+    """
+    Create a temporary database table with photo, sign and semantic data.
 
-    # temp_tbl_name = temp_photo_signs
+    The temporary table contains only the records that match:
+    - the requested traffic sign regex;
+    - the requested longitude and latitude bounding box;
+    - the requested start and end date.
 
+    The temporary table is used by the rest of the pipeline to avoid repeating
+    the same filtering query.
+
+    Parameters
+    ----------
+    cursor:
+        Database cursor used to execute the SQL query.
+
+    longitude_min:
+        Minimum longitude of the area filter.
+
+    longitude_max:
+        Maximum longitude of the area filter.
+
+    latitude_min:
+        Minimum latitude of the area filter.
+
+    latitude_max:
+        Maximum latitude of the area filter.
+
+    start_date:
+        Start date/time filter.
+
+    end_date:
+        End date/time filter.
+
+    sign_regex:
+        Regular expression used to select traffic sign codes.
+
+    Returns
+    -------
+    None
+    """
+
+    # Build a SQL query safely with psycopg2.sql.
+    # Identifiers, such as schema and table names, are inserted with sql.Identifier.
+    # Values, such as coordinates and dates, are inserted with sql.Literal.
     query = sql.SQL("""
         DROP TABLE IF EXISTS {temp_tbl_name};
         CREATE TEMP TABLE {temp_tbl_name} AS
@@ -84,28 +103,40 @@ def create_temp_dataset(cursor: str,
         CREATE INDEX ON temp_photo_signs USING GIST(geom);
         CREATE INDEX ON temp_photo_signs (traffic_sign_code);
     """).format(
+        # Filter value for the traffic sign code regex.
         sign_regex=sql.Literal(sign_regex),
+
+        # Spatial filter values.
         longitude_min=sql.Literal(longitude_min),
         longitude_max=sql.Literal(longitude_max),
         latitude_min=sql.Literal(latitude_min),
         latitude_max=sql.Literal(latitude_max),
+
+        # Date/time filter values.
         start_date=sql.Literal(start_date),
         end_date=sql.Literal(end_date),
-        schema = sql.Identifier(DB_SCHEMA),
-        tbl_photo = sql.Identifier(IN_TABLE_PHOTO),
-        tbl_signs = sql.Identifier(IN_TABLE_SIGNS),
-        tbl_sematics = sql.Identifier(IN_TABLE_SEMANTICS),
-        temp_tbl_name = sql.Identifier(TEMP_TABLE)
+
+        # Schema and table names from configuration.
+        schema = sql.Identifier(tsgcf.DB_SCHEMA),
+        tbl_photo = sql.Identifier(tsgcf.IN_TABLE_PHOTO),
+        tbl_signs = sql.Identifier(tsgcf.IN_TABLE_SIGNS),
+        tbl_sematics = sql.Identifier(tsgcf.IN_TABLE_SEMANTICS),
+        temp_tbl_name = sql.Identifier(tsgcf.TEMP_TABLE)
     )
 
+
+
+    # Execute the query if a cursor was provided.
     if cursor:
         try:
             cursor.execute(query)
 
         except Exception as e:
+            # Log database errors and raise them again so the caller can handle them.
             logger.error(f"Database error: {e}")
             raise
     else:
+        # If no cursor is available, the temporary table cannot be created.
         logger.warning("No cursor provided")
 
     logger.info("Temporary table created")
@@ -114,48 +145,56 @@ def create_temp_dataset(cursor: str,
 
 def get_signs_list(cursor=None) -> List[Tuple[str, int]]:
 
-    """Return all distinct sign types (and their observation counts) from the DB or CSV file.
+    """
+    Return all distinct sign types and their observation counts.
+
+    The function reads from the temporary table created by create_temp_dataset().
+    It groups records by traffic sign code and counts how many observations are
+    available per code.
 
     Parameters
     ----------
-    cursor : database cursor, optional
-        Database cursor for executing queries
-    file_loc : str or Path, optional
-        Path to directory where CSV file should be read/written
+    cursor:
+        Database cursor for executing the query.
 
     Returns
     -------
-    list of (traffic_sign_code, count) tuples
+    List[Tuple[str, int]]
+        List of tuples:
+        - traffic sign code;
+        - number of observations.
 
     Raises
     ------
-    FileNotFoundError
-        When CSV file doesn't exist and no cursor is provided
-    csv.Error
-        When there are issues reading/writing the CSV file
     Exception
-        For database-related errors
+        For database-related errors.
     """
 
+    # Query the temporary table and count records per traffic sign code.
     query = sql.SQL("""
         SELECT traffic_sign_code, COUNT(*)
         FROM {temp_tbl_name}
         GROUP BY traffic_sign_code
         ORDER BY traffic_sign_code
     """).format(
-        temp_tbl_name = sql.Identifier(TEMP_TABLE)
+        temp_tbl_name = sql.Identifier(tsgcf.TEMP_TABLE)
     )
 
+
     rows = []
+
+    # Execute query if a cursor was provided.
     if cursor:
         try:
             cursor.execute(query)
             rows = cursor.fetchall()
 
         except Exception as e:
+            # Log database errors and raise them again so the caller can handle them.
             logger.error(f"Database error: {e}")
             raise
     else:
+        # Without a cursor, the database cannot be queried.
         logger.warning("No cursor provided")
         return []
 
@@ -163,40 +202,51 @@ def get_signs_list(cursor=None) -> List[Tuple[str, int]]:
  
 def get_signs(cursor=None, 
                 sign_type: str=None) -> List[Dict[str, Any]]:
-    """Fetch all panoramic-photo annotations for a given sign type.
+    """
+    Fetch all panoramic-photo annotations for a given sign type.
 
-    The result set includes the photo metadata (location, azimuth, resolution,
-    field of view) and the bounding box of the detected sign.
+    The result set includes:
+    - photo metadata;
+    - photo location;
+    - camera azimuth;
+    - image resolution;
+    - field of view;
+    - annotation ID;
+    - traffic sign code;
+    - confidence score;
+    - bounding box.
+
+    The function also adds parsed and cleaned geometry fields to each record.
 
     Parameters
     ----------
-    sign_type : str
-        RVV sign code to filter on (e.g. ``"NL:B06"``)
-    cursor : database cursor, optional
-        An open psycopg2 cursor
-    file_path : str or Path, optional
-        Path to directory where CSV file should be read/written
+    cursor:
+        Database cursor for executing the query.
+
+    sign_type:
+        Traffic sign code to filter on, for example "NL:B06".
 
     Returns
     -------
-    list of dicts
-        Each dict contains the fields from FIELD_NAMES plus parsed bbox data
+    List[Dict[str, Any]]
+        List of dictionaries.
+        Each dictionary contains the selected database fields plus:
+        - parsed bbox min/max values;
+        - origin as a Shapely geometry;
+        - flattened bbox coordinates.
 
     Raises
     ------
-    ValueError
-        When sign_type is empty or invalid
-    FileNotFoundError
-        When CSV file doesn't exist and no cursor is provided
-    csv.Error
-        When there are issues reading/writing the CSV file
     Exception
-        For database-related errors
+        For database-related errors or parsing errors.
     """
+
     # ===========================================================================
     # Column names for database result sets
     # ===========================================================================
 
+    # These names are used to convert database rows into dictionaries.
+    # The order must match the SELECT statement below.
     FIELD_NAMES = [
         "picture_id",
         "picture_collection_id",
@@ -213,6 +263,7 @@ def get_signs(cursor=None,
     ]
 
 
+    # Query records for one specific traffic sign type from the temporary table.
     query = sql.SQL("""
         SELECT
             picture_id,
@@ -231,24 +282,39 @@ def get_signs(cursor=None,
         WHERE traffic_sign_code = {sign}
     """).format(
         sign=sql.Literal(sign_type),
-        temp_tbl_name = sql.Identifier(TEMP_TABLE)
+        temp_tbl_name = sql.Identifier(tsgcf.TEMP_TABLE)
     )
 
+
     rows = []
+
     try:
+        # Execute the query.
+        # The query already contains the safely formatted sign_type value.
         # cursor.execute(query, (sign_type,))
         cursor.execute(query)
+
+        # Fetch all rows from the database cursor.
         rows = cursor.fetchall()
+
+        # Convert each database row to a dictionary using FIELD_NAMES.
         named_records = [dict(zip(FIELD_NAMES, r)) for r in rows]
 
+        # Add parsed fields to every record.
         for record in named_records:
+            # Add bbox min/max values to the record.
             record.update(parse_bbox(record["bbox"]))
+
+            # Parse photo coordinates from WKT into a Shapely geometry.
             record["origin"] = wkt.loads(record["picture_coordinates"])
+
+            # Parse bbox JSON and flatten it to a list of [x, y] coordinate pairs.
             record["bbox_clean"] = flatten_coords(json.loads(record["bbox"]))
 
         return named_records
 
     except Exception as e:
+        # Log the sign type for easier debugging.
         logger.error(f"Error in get_signs for sign type {sign_type}: {e}")
         raise
 
@@ -258,41 +324,64 @@ def get_signs(cursor=None,
 # ===========================================================================
 
 def flatten_coords(data: list) -> list:
-    """Recursively flatten nested coordinate lists to a list of [x, y] pairs.
- 
+    """
+    Recursively flatten nested coordinate lists to a list of [x, y] pairs.
+
+    Bounding box data can be nested, for example when it comes from GeoJSON-like
+    structures. This function walks through that nested structure until it finds
+    coordinate pairs.
+
     Parameters
     ----------
     data:
         Arbitrarily nested list of numbers or sub-lists, as returned by
-        ``json.loads`` on a GeoJSON bbox field.
- 
+        json.loads() on a bbox field.
+
     Returns
     -------
-    list of [x, y] pairs
+    list
+        List of [x, y] coordinate pairs.
     """
+
+    # Base case:
+    # if the first item is a number, this level is already one coordinate pair.
     if isinstance(data[0], (int, float)):
         return [data]
+
+    # Recursive case:
+    # flatten each nested item and combine all resulting coordinate pairs.
     return [point for item in data for point in flatten_coords(item)]
  
  
 def parse_bbox(bbox_json: str | None) -> dict:
-    """Parse a GeoJSON bbox string into min/max pixel coordinates.
- 
+    """
+    Parse a JSON bbox string into minimum and maximum pixel coordinates.
+
     Parameters
     ----------
     bbox_json:
-        Raw JSON string from the database, or ``None``.
- 
+        Raw JSON string from the database, or None.
+
     Returns
     -------
     dict
-        ``{"bbox_xmin", "bbox_xmax", "bbox_ymin", "bbox_ymax"}``
-        All values are ``None`` when *bbox_json* is ``None``.
+        Dictionary with:
+        - bbox_xmin;
+        - bbox_xmax;
+        - bbox_ymin;
+        - bbox_ymax.
+
+        All values are None when bbox_json is None.
     """
+
+    # If no bbox is available, return empty bbox values.
     if bbox_json is None:
         return {"bbox_xmin": None, "bbox_xmax": None, "bbox_ymin": None, "bbox_ymax": None}
- 
+
+    # Parse JSON and flatten possible nested coordinates.
     coords = flatten_coords(json.loads(bbox_json))
+
+    # Calculate min/max pixel coordinates.
     return {
         "bbox_xmin": min(p[0] for p in coords),
         "bbox_xmax": max(p[0] for p in coords),

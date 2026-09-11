@@ -1,78 +1,13 @@
-def get_db_connection () -> "psycopg2.extensions.connection":
-    _pgpass_path = TOKEN_PATH
-    with open(_pgpass_path, "r") as _f:
-        _token = _f.read().strip().split(":")[-1]
-    
-    _username = USERNAME
-    _host     = HOST
-    _port     = PORT
-    _database = DB
-    
-    _conn_string = (
-        f"postgresql://{quote_plus(_username)}:{_token}"
-        f"@{_host}:{_port}/{_database}"
-    )
+# Standard library
+from datetime import datetime
 
-    print(f"_conn_string: {_conn_string}")
+# Local
+import tisgrade_config as tsgcf
+import tisgrade_classes as tsgc
+import tisgrade_data_classes as tsgdc
+import tisgrade_data_load as tsg_dl
+import tisgrade_data_store as tsg_ds
 
-    logger.info("Connecting to database")
-    pg_connection = psycopg2.connect(
-        _conn_string,
-        keepalives=KEEPALIVES,
-        keepalives_idle=KEEPALIVES_IDLE,            # start probing after xs idle
-        keepalives_interval=KEEPALIVES_INTERVAL,    # retry every xs
-        keepalives_count=KEEPALIVES_COUNT,          # give up (and let the OS/driver notice) after x failed probes
-    )
-    return pg_connection
-
-
-def setup_logging(debug=False):
-    """Centralized logging configuration for the entire application."""
-
-    # Create log directory
-    log_dir = Path(__file__).parent / "log"
-    log_dir.mkdir(exist_ok=True)
-
-    # Log file with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = log_dir / f"app_{timestamp}.log"
-
-    # Get the named logger
-    logger = logging.getLogger("tisgrade")
-    logger.setLevel(logging.DEBUG if debug else logging.INFO)
-
-    # Clear any existing handlers
-    for h in logger.handlers:
-        h.close()
-    logger.handlers.clear()
-
-    logger.propagate = False
-
-
-    # Create formatter
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-
-    # Create file handler
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-
-    # Create console handler if in debug mode
-    if debug:
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-
-    # Suppress noisy third-party logs
-    logging.getLogger('numba').setLevel(logging.WARNING)
-    logging.getLogger('pyogrio').setLevel(logging.WARNING)
-
-    logger.info("Logging initialized. Log file: %s", log_file)
-
-    return logger
 
 
 def locate_panoramax_objects(sign_parameters: "tsgdc.SignParameters", geo_bounds: "tsgdc.GeoBounds", run_parameters: "tsgdc.RunParameters",  quality: "tsgdc.QualitySetting", pg_conn: "psycopg2.extensions.connection"):
@@ -262,17 +197,17 @@ def locate_panoramax_objects(sign_parameters: "tsgdc.SignParameters", geo_bounds
         # ---------------------------------------------------------------------- #
         # Step 5: Persist to database and GeoPackage files
         # ---------------------------------------------------------------------- #
-        if STORE_GEO_PACK:
+        if tsgcf.STORE_GEO_PACK:
             if lst_obj_anna:
-                tsg_ds.write_to_gpkg_lines(OUTPUT_DIR_GEO_PACK, lst_obj_anna)
+                tsg_ds.write_to_gpkg_lines(lst_obj_anna)
             if lst_intersection:
-                tsg_ds.write_to_gpkg_intersection(OUTPUT_DIR_GEO_PACK, lst_intersection, sign_type)
+                tsg_ds.write_to_gpkg_intersection(lst_intersection, sign_type)
             if lst_inter_reliable:
-                tsg_ds.write_to_gpkg_intersection_reliable(OUTPUT_DIR_GEO_PACK, lst_inter_reliable, sign_type)
+                tsg_ds.write_to_gpkg_intersection_reliable(lst_inter_reliable, sign_type)
             if lst_cluster:
-                tsg_ds.write_to_gpkg_clusters(OUTPUT_DIR_GEO_PACK, lst_cluster, sign_type)
+                tsg_ds.write_to_gpkg_clusters(lst_cluster, sign_type)
             if lst_clean_centroid:
-                tsg_ds.write_to_gpkg_centriods(OUTPUT_DIR_GEO_PACK, lst_clean_centroid, sign_type)
+                tsg_ds.write_to_gpkg_centriods(lst_clean_centroid, sign_type)
         
         tsg_ds.write_centriod_to_db(
             cur, 
@@ -295,54 +230,7 @@ Main entry point for the traffic-sign geolocation pipeline.
 """
 if __name__ == "__main__":
 
-    # Standard library
-    from urllib.parse import quote_plus
-    from datetime import datetime
-    import os
-    from pathlib import Path
-    import logging
-    from dotenv import load_dotenv
-    
-    
-    # Third-party
-    import psycopg2
-
-    
-    # Local
-    import tisgrade_classes as tsgc
-    import tisgrade_data_classes as tsgdc
-    import tisgrade_data_load as tsg_dl
-    import tisgrade_data_store as tsg_ds 
-
-    # config information
-    # from tisgrade_config import STORE_GEO_PACK, OUTPUT_DIR_GEO_PACK
-    # from tisgrade_config import USERNAME, HOST, PORT, DB, TOKEN_PATH
-    # from tisgrade_config import KEEPALIVES, KEEPALIVES_IDLE, KEEPALIVES_INTERVAL, KEEPALIVES_COUNT
-    # from tisgrade_config import setup_logging
-
-    # For development (shows debug and info messages in console)
-    # logger = setup_logging(debug=True)
-    
-    # For production (only writes to log file)
-
-    load_dotenv()
-
-    STORE_GEO_PACK          = STORE_GEO_PACK = os.environ["STORE_GEO_PACK"].lower() == "true"
-    OUTPUT_DIR_GEO_PACK     = Path(os.environ["OUTPUT_DIR_GEO_PACK"])
-
-    USERNAME                = os.environ["DB_USERNAME"]
-    HOST                    = os.environ["HOST"]
-    PORT                    = os.environ["PORT"]
-    DB                      = os.environ["DB"]
-    TOKEN_PATH              = Path(os.environ["TOKEN_PATH"])
-
-    KEEPALIVES              = int(os.environ["KEEPALIVES"])
-    KEEPALIVES_IDLE         = int(os.environ["KEEPALIVES_IDLE"])
-    KEEPALIVES_INTERVAL     = int(os.environ["KEEPALIVES_INTERVAL"])
-    KEEPALIVES_COUNT        = int(os.environ["KEEPALIVES_COUNT"])
-
-
-    logger = setup_logging(debug=True)
+    logger = tsgcf.setup_logging(debug=True)
 
     try:
         logger.info("Application started")
@@ -365,14 +253,14 @@ if __name__ == "__main__":
         RUN_NAME = 'Joost test run'
 
         # quality setting
-        INTERS_MIN = 10 # minimum angle betwee to lines to form a intersection
-        INTERS_MAX = 150 # maximum angle between to lines to form a intersection
-        SIGN_SIZE_SCORE = 0.8 # minimum score for compaing the size of the same sing for two lines based on there intersection.
+        INTERS_MIN = 10         # minimum angle betwee to lines to form a intersection
+        INTERS_MAX = 150        # maximum angle between to lines to form a intersection
+        SIGN_SIZE_SCORE = 0.8   # minimum score for compaing the size of the same sing for two lines based on there intersection.
         MAX_CLUSTER_RADIUS_M = 3 #distance for all the intersections to be from the middel of the cluster.
-        MIN_CLUSTER_SIZE = 1 # Minimum amount of intersections in a cluster
-        MAX_RECURSIONS = 20 # Maximum dept of recursion of cluster algoritm
-        EPSILON_START = 1.5 # Start value of Epsilon
-        EPSION_DECREASE = .75 # The factor with epsilon gets smaller each time a recursion occurs. Must be smaller than 1 and bigger than 0
+        MIN_CLUSTER_SIZE = 1    # Minimum amount of intersections in a cluster
+        MAX_RECURSIONS = 20     # Maximum dept of recursion of cluster algoritm
+        EPSILON_START = 1.5     # Start value of Epsilon
+        EPSION_DECREASE = .75   # The factor with epsilon gets smaller each time a recursion occurs. Must be smaller than 1 and bigger than 0
         
 
         geo_bounds=tsgdc.GeoBounds(
@@ -410,7 +298,7 @@ if __name__ == "__main__":
             cluster_epsilon_decrease = EPSION_DECREASE
         )
 
-        pg_conn = get_db_connection()
+        pg_conn = tsgcf.get_db_connection()
 
         locate_panoramax_objects(sign_param, geo_bounds, run_param, ql_setings, pg_conn)  
 

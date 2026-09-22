@@ -158,6 +158,7 @@ def write_centriod_to_db(cur, lst_centroid: list[tsgc.Centroid], sign_code: str,
                 obj_ann.distance_m(centriod.get_center()),
                 obj_ann.object_size_m(centriod.get_center()),
                 obj_ann.get_origin().wkt,
+                obj_ann.get_picture_timestamp()
             )
             for cluster_idx, centriod in enumerate(lst_centroid)
             for obj_ann in centriod.get_lst_object_annotation()
@@ -182,7 +183,8 @@ def write_centriod_to_db(cur, lst_centroid: list[tsgc.Centroid], sign_code: str,
                 line, 
                 object_distance, 
                 object_size,
-                scan_location
+                picture_location,
+                picture_datetimetz
             )
             VALUES %s
             """).format(

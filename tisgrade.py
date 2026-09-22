@@ -1,6 +1,9 @@
 # Standard library
 from datetime import datetime
 
+# Third-party
+import psycopg2
+
 # Local
 import tisgrade_config as tsgcf
 import tisgrade_classes as tsgc
@@ -8,6 +11,96 @@ import tisgrade_data_classes as tsgdc
 import tisgrade_data_load as tsg_dl
 import tisgrade_data_store as tsg_ds
 
+
+def lib_locate_object(lst_obj_anna: list["tsgc.ObjectAnnotation"], quality: "tsgdc.QualitySetting"):
+    # ---------------------------------------------------------------------- #
+    # Step 2: Find pairwise intersections and enrich them
+    # ---------------------------------------------------------------------- #
+    start_dt = datetime.now()
+    logger.info(f'1 find intersections')
+    lst_intersection = tsgc.Intersection.find_intersections(lst_obj_anna)
+
+
+    # ---------------------------------------------------------------------- #
+    # Step 3: Filter to geometrically reliable intersections
+    #
+    # Criteria:
+    #   - Angle between lines ≥ MIN_INTERSECTION_ANGLE_DEG  (location precision)
+    #   - Angle between lines ≤ MAX_INTERSECTION_ANGLE_DEG  (both cameras can
+    #     plausibly see the same sign within a ±75° viewing cone)
+    #   - Relative size discrepancy ≤ MIN_SIZE_SCORE         (same sign, not two)
+    # ---------------------------------------------------------------------- #
+
+    logger.info(f'2 find reliable intersections')
+    lst_inter_reliable = [
+        item for item in lst_intersection
+        if (
+            (size_score := item.object_size_score()) is not None
+            and size_score >= quality.sign_size_score
+            and (angle := item.angle_between_lines()) is not None
+            and quality.intersection_angle_deg_min <= angle <= quality.intersection_angle_deg_max
+        )
+    ]
+
+    if not lst_inter_reliable:
+        # continue
+        return [], [], [], []
+
+    logger.info(f'3 create base cluster')
+    cluster = tsgc.Cluster()
+
+    for inter_sec in lst_inter_reliable:
+        cluster.add_intersection(inter_sec)
+
+
+    logger.info(f'{datetime.now()-start_dt} time pre processing')   
+    # ---------------------------------------------------------------------- #
+    # Step 4: Cluster reliable intersections → sign locations
+    # ---------------------------------------------------------------------- #
+    start_dt = datetime.now()
+    logger.info(f'4 start clustering')
+    lst_cluster  = tsgc.Cluster.funct_cluster(
+        cluster=cluster,
+        max_radius_m=quality.cluster_radius_m_max,
+        epsilon=quality.cluster_epsilon_start,
+        epsilon_decrease=quality.cluster_epsilon_decrease,
+        max_dept=quality.cluster_max_dept,
+        min_samples=quality.cluster_min_size
+    )
+
+    logger.info(f'{datetime.now()-start_dt} time clustering')
+    # ghost busters and save the orpins part
+    # ghost cluster will be eliminated
+    # orpin lines close to a cluster will be connected to a cluster
+
+    
+    start_dt = datetime.now()
+    logger.info(f'5 start save the orphans and ghostbuster')
+    lst_centroid: list[tsgc.Centroid] = []
+
+    lst_obj_anna = [
+        obj_anna
+        for obj_anna in lst_obj_anna
+        if obj_anna.get_line() is not None and obj_anna.get_line().is_valid
+    ]
+
+
+
+    for cluster in lst_cluster:
+        centroid = tsgc.Centroid(cluster)                    
+        lst_centroid.append(centroid)
+    tsgc.Centroid.add_valid_object_annotations_all_centroids(lst_centroids=lst_centroid, list_object_annotation=lst_obj_anna, MAX_CLUSTER_RADIUS_M= quality.cluster_radius_m_max)
+
+    lst_clean_centroid = tsgc.Centroid.resolve_centroid_assignments(lst_centroid, quality.cluster_radius_m_max)
+
+    logger.info(f'{datetime.now()-start_dt} time post processing')
+    logger.info(f'done')
+
+    
+    logger.info(f'len cluster: {len(lst_cluster)}, len centroid: {len(lst_centroid)} len clean cent: {len(lst_clean_centroid)}')
+
+    return lst_clean_centroid, lst_cluster, lst_inter_reliable, lst_intersection
+    
 
 
 def locate_panoramax_objects(sign_parameters: "tsgdc.SignParameters", geo_bounds: "tsgdc.GeoBounds", run_parameters: "tsgdc.RunParameters",  quality: "tsgdc.QualitySetting", pg_conn: "psycopg2.extensions.connection"):
@@ -82,7 +175,7 @@ def locate_panoramax_objects(sign_parameters: "tsgdc.SignParameters", geo_bounds
         records = tsg_dl.get_signs(cursor=cur,  
                                         sign_type=sign_type)
 
-        start_dt = datetime.now()
+        lst_clean_centroid = datetime.now()
         logger.info(f'start data preprocessing')
 
         lst_obj_anna = []
@@ -98,7 +191,8 @@ def locate_panoramax_objects(sign_parameters: "tsgdc.SignParameters", geo_bounds
                     pic_field_of_view = record["picture_field_of_view"],
                     pic_azimuth = record["picture_azimuth"],
                     picture_id = record["picture_id"],
-                    annotation_id = record["annotation_id"]
+                    annotation_id = record["annotation_id"],
+                    picture_timestamp= record["picture_timestamptz"]
             )
 
             sing_min_size = sign_parameters.sign_size_min * (1 - sign_parameters.sign_size_margin)
@@ -108,106 +202,115 @@ def locate_panoramax_objects(sign_parameters: "tsgdc.SignParameters", geo_bounds
             annObj.set_max_object_size(sing_max_size)
 
             lst_obj_anna.append(annObj)
-    
-        # ---------------------------------------------------------------------- #
-        # Step 2: Find pairwise intersections and enrich them
-        # ---------------------------------------------------------------------- #
-        logger.info(f'2 find intersections')
-        lst_intersection = tsgc.Intersection.find_intersections(lst_obj_anna)
-
-    
-        # ---------------------------------------------------------------------- #
-        # Step 3: Filter to geometrically reliable intersections
-        #
-        # Criteria:
-        #   - Angle between lines ≥ MIN_INTERSECTION_ANGLE_DEG  (location precision)
-        #   - Angle between lines ≤ MAX_INTERSECTION_ANGLE_DEG  (both cameras can
-        #     plausibly see the same sign within a ±75° viewing cone)
-        #   - Relative size discrepancy ≤ MIN_SIZE_SCORE         (same sign, not two)
-        # ---------------------------------------------------------------------- #
-
-        logger.info(f'3 find reliable intersections')
-        lst_inter_reliable = [
-            item for item in lst_intersection
-            if (
-                (size_score := item.object_size_score()) is not None
-                and size_score >= quality.sign_size_score
-                and (angle := item.angle_between_lines()) is not None
-                and quality.intersection_angle_deg_min <= angle <= quality.intersection_angle_deg_max
-            )
-        ]
-
-        if not lst_inter_reliable:
-            continue
-
-        logger.info(f'4 create base cluster')
-        cluster = tsgc.Cluster()
-
-        for inter_sec in lst_inter_reliable:
-            cluster.add_intersection(inter_sec)
-
-
-        logger.info(f'{datetime.now()-start_dt} time pre processing')   
-        # ---------------------------------------------------------------------- #
-        # Step 4: Cluster reliable intersections → sign locations
-        # ---------------------------------------------------------------------- #
-        start_dt = datetime.now()
-        logger.info(f'start clustering')
-        lst_cluster  = tsgc.Cluster.funct_cluster(
-            cluster=cluster,
-            max_radius_m=quality.cluster_radius_m_max,
-            epsilon=quality.cluster_epsilon_start,
-            epsilon_decrease=quality.cluster_epsilon_decrease,
-            max_dept=quality.cluster_max_dept,
-            min_samples=quality.cluster_min_size
-        )
-
-        logger.info(f'{datetime.now()-start_dt} time clustering')
-        # ghost busters and save the orpins part
-        # ghost cluster will be eliminated
-        # orpin lines close to a cluster will be connected to a cluster
-
-        
-        start_dt = datetime.now()
-        logger.info(f'start save the orphans and ghostbuster')
-        lst_centroid: list[tsgc.Centroid] = []
-
-        lst_obj_anna = [
-            obj_anna
-            for obj_anna in lst_obj_anna
-            if obj_anna.get_line() is not None and obj_anna.get_line().is_valid
-        ]
-
-
-
-        for cluster in lst_cluster:
-            centroid = tsgc.Centroid(cluster)                    
-            lst_centroid.append(centroid)
-        tsgc.Centroid.add_valid_object_annotations_all_centroids(lst_centroids=lst_centroid, list_object_annotation=lst_obj_anna, MAX_CLUSTER_RADIUS_M= quality.cluster_radius_m_max)
-
-        lst_clean_centroid = tsgc.Centroid.resolve_centroid_assignments(lst_centroid, quality.cluster_radius_m_max)
-
-        logger.info(f'{datetime.now()-start_dt} time post processing')
-        logger.info(f'done')
 
         logger.info(f'records: {len(records)}, object annatotions: {len(lst_obj_anna)}')
-        logger.info(f'len cluster: {len(lst_cluster)}, len centroid: {len(lst_centroid)} len clean cent: {len(lst_clean_centroid)}')
+
+
+        lst_clean_centroid, lst_cluster, lst_inter_reliable, lst_intersection  = lib_locate_object(lst_obj_anna, quality)
+    
+        # # ---------------------------------------------------------------------- #
+        # # Step 2: Find pairwise intersections and enrich them
+        # # ---------------------------------------------------------------------- #
+        # logger.info(f'2 find intersections')
+        # lst_intersection = tsgc.Intersection.find_intersections(lst_obj_anna)
+
+    
+        # # ---------------------------------------------------------------------- #
+        # # Step 3: Filter to geometrically reliable intersections
+        # #
+        # # Criteria:
+        # #   - Angle between lines ≥ MIN_INTERSECTION_ANGLE_DEG  (location precision)
+        # #   - Angle between lines ≤ MAX_INTERSECTION_ANGLE_DEG  (both cameras can
+        # #     plausibly see the same sign within a ±75° viewing cone)
+        # #   - Relative size discrepancy ≤ MIN_SIZE_SCORE         (same sign, not two)
+        # # ---------------------------------------------------------------------- #
+
+        # logger.info(f'3 find reliable intersections')
+        # lst_inter_reliable = [
+        #     item for item in lst_intersection
+        #     if (
+        #         (size_score := item.object_size_score()) is not None
+        #         and size_score >= quality.sign_size_score
+        #         and (angle := item.angle_between_lines()) is not None
+        #         and quality.intersection_angle_deg_min <= angle <= quality.intersection_angle_deg_max
+        #     )
+        # ]
+
+        # if not lst_inter_reliable:
+        #     continue
+
+        # logger.info(f'4 create base cluster')
+        # cluster = tsgc.Cluster()
+
+        # for inter_sec in lst_inter_reliable:
+        #     cluster.add_intersection(inter_sec)
+
+
+        # logger.info(f'{datetime.now()-start_dt} time pre processing')   
+        # # ---------------------------------------------------------------------- #
+        # # Step 4: Cluster reliable intersections → sign locations
+        # # ---------------------------------------------------------------------- #
+        # start_dt = datetime.now()
+        # logger.info(f'start clustering')
+        # lst_cluster  = tsgc.Cluster.funct_cluster(
+        #     cluster=cluster,
+        #     max_radius_m=quality.cluster_radius_m_max,
+        #     epsilon=quality.cluster_epsilon_start,
+        #     epsilon_decrease=quality.cluster_epsilon_decrease,
+        #     max_dept=quality.cluster_max_dept,
+        #     min_samples=quality.cluster_min_size
+        # )
+
+        # logger.info(f'{datetime.now()-start_dt} time clustering')
+        # # ghost busters and save the orpins part
+        # # ghost cluster will be eliminated
+        # # orpin lines close to a cluster will be connected to a cluster
+
+        
+        # start_dt = datetime.now()
+        # logger.info(f'start save the orphans and ghostbuster')
+        # lst_centroid: list[tsgc.Centroid] = []
+
+        # lst_obj_anna = [
+        #     obj_anna
+        #     for obj_anna in lst_obj_anna
+        #     if obj_anna.get_line() is not None and obj_anna.get_line().is_valid
+        # ]
+
+
+
+        # for cluster in lst_cluster:
+        #     centroid = tsgc.Centroid(cluster)                    
+        #     lst_centroid.append(centroid)
+        # tsgc.Centroid.add_valid_object_annotations_all_centroids(lst_centroids=lst_centroid, list_object_annotation=lst_obj_anna, MAX_CLUSTER_RADIUS_M= quality.cluster_radius_m_max)
+
+        # lst_clean_centroid = tsgc.Centroid.resolve_centroid_assignments(lst_centroid, quality.cluster_radius_m_max)
+
+        # logger.info(f'{datetime.now()-start_dt} time post processing')
+        # logger.info(f'done')
+
+        # logger.info(f'records: {len(records)}, object annatotions: {len(lst_obj_anna)}')
+        # logger.info(f'len cluster: {len(lst_cluster)}, len centroid: {len(lst_centroid)} len clean cent: {len(lst_clean_centroid)}')
             
     
         # ---------------------------------------------------------------------- #
-        # Step 5: Persist to database and GeoPackage files
+        # Step 5: Write GeoPackage files
         # ---------------------------------------------------------------------- #
         if tsgcf.STORE_GEO_PACK:
-            if lst_obj_anna:
+            if lst_obj_anna and len(lst_obj_anna) > 0:
                 tsg_ds.write_to_gpkg_lines(lst_obj_anna)
-            if lst_intersection:
+            if lst_intersection and len(lst_intersection) > 0:
                 tsg_ds.write_to_gpkg_intersection(lst_intersection, sign_type)
-            if lst_inter_reliable:
+            if lst_inter_reliable and len(lst_inter_reliable) > 0:
                 tsg_ds.write_to_gpkg_intersection_reliable(lst_inter_reliable, sign_type)
-            if lst_cluster:
+            if lst_cluster and len(lst_cluster) > 0:
                 tsg_ds.write_to_gpkg_clusters(lst_cluster, sign_type)
-            if lst_clean_centroid:
+            if lst_clean_centroid and len(lst_clean_centroid) > 0:
                 tsg_ds.write_to_gpkg_centriods(lst_clean_centroid, sign_type)
+
+        # ---------------------------------------------------------------------- #
+        # Step 6: Persist to database
+        # ---------------------------------------------------------------------- #                
         
         tsg_ds.write_centriod_to_db(
             cur, 
@@ -242,15 +345,15 @@ if __name__ == "__main__":
         LATITUDE_MAX = 52.432766 # y max
 
         # sign details
-        SIGN_REX = 'NL:C21'
+        SIGN_REX = 'NL:L02'
         SIGN_MIN = 0.4
         SIGN_MAX = 0.8
         SIGN_MARGIN = 0.25
 
         # run details
-        RUN_START = '2025-01-01 00:00:00'
-        RUN_END = '2026-01-01 00:00:00'
-        RUN_NAME = 'Joost test run'
+        RUN_START = '2024-01-01 00:00:00'
+        RUN_END = '2026-09-01 00:00:00'
+        RUN_NAME = 'Annika L02'
 
         # quality setting
         INTERS_MIN = 10         # minimum angle betwee to lines to form a intersection

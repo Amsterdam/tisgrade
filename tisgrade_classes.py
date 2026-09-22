@@ -1,6 +1,7 @@
 # Standard library
 import logging
 import math
+from datetime import datetime
 
 # Third-party geospatial and numerical libraries
 import geopandas as gpd
@@ -66,7 +67,8 @@ class ObjectAnnotation:
                  pic_field_of_view: float | int, 
                  pic_azimuth: float | int, 
                  picture_id: str = None,
-                 annotation_id: str = None):
+                 annotation_id: str = None,
+                 picture_timestamp: datetime = None):
         """
         Initialize an ObjectAnnotation.
 
@@ -100,6 +102,9 @@ class ObjectAnnotation:
 
         annotation_id:
             Optional ID of the source annotation.
+
+        picture_timestamp:
+            Optional timestamp when picture was made. Must be timestamp with timezone.
         """
                  
         # Assign a unique internal ID to this object annotation.
@@ -159,6 +164,12 @@ class ObjectAnnotation:
         if not isinstance(annotation_id, str | None):
             raise TypeError('annotation_id must be a string or None')
         self.__object_annotation_id = annotation_id
+
+        # Validate optional picture_timestamp.
+        if picture_timestamp is not None:
+            if picture_timestamp.tzinfo is None or picture_timestamp.utcoffset() is None:
+                raise ValueError("picture_timestamp must be timezone-aware")
+        self.__picture_timestamp = picture_timestamp        
 
         # Minimum and maximum real-world object size in metres.
         # These values are needed to calculate the possible object location line.
@@ -261,6 +272,9 @@ class ObjectAnnotation:
     def get_object_annotation_id(self)-> str | None:
         """Return the source annotation ID, if available."""
         return self.__object_annotation_id
+
+    def get_picture_timestamp(self)-> datetime | None:
+        return self.__picture_timestamp
 
     def print(self)-> None:
         """

@@ -208,6 +208,7 @@ def get_signs(cursor=None,
     The result set includes:
     - photo metadata;
     - photo location;
+    - photo date time;
     - camera azimuth;
     - image resolution;
     - field of view;
@@ -250,7 +251,7 @@ def get_signs(cursor=None,
     FIELD_NAMES = [
         "picture_id",
         "picture_collection_id",
-        "picture_timestamp",
+        "picture_timestamptz",
         "picture_coordinates",
         "picture_field_of_view",
         "picture_azimuth",

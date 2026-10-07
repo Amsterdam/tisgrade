@@ -34,6 +34,6 @@ class QualitySettings:
     sign_size_score: float              # Relative size discrepancy between the two lines
     cluster_radius_m_max: float         # Maximum radius (metres) within which points are considered part of the same sign location.
     cluster_min_size: int               # Minimum size of a cluster. min value 1, means one intersection is enough to create a cluster
-    cluster_max_dept: int               # Maximum dept of recursion of cluster algorithm
+    cluster_max_depth: int               # Maximum dept of recursion of cluster algorithm
     cluster_epsilon_start: float        # Starting value of epsilon
     cluster_epsilon_decrease: float     # The factor with epsilon decreases each time a recursion occurs

@@ -15,7 +15,7 @@ from haversine import haversine
 from numpy.typing import NDArray
 from scipy.stats import circmean
 from shapely import GeometryType, STRtree
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import transform
 
 # Clustering tools
@@ -29,7 +29,6 @@ import tisgrade_config as tsgcf
 # Module-level logger.
 # This creates a logger name like: tisgrade.tisgrade_classes
 logger = logging.getLogger(f"tisgrade.{__name__}")
-
 
 # ===========================================================================
 # Classes
@@ -59,52 +58,51 @@ class ObjectAnnotation:
     __next_id = 0
 
     def __init__(self, 
-                 object_code: str, 
-                 bbox: list, 
-                 origin: Point, 
+                #  object_code: str, 
+                 origin: Point,                    
+                 pic_azimuth: float | int,
                  pic_size_hor_px: int, 
                  pic_size_ver_px: int, 
                  pic_field_of_view: float | int, 
-                 pic_azimuth: float | int, 
-                 picture_id: str = None,
-                 annotation_id: str = None,
-                 picture_timestamp: datetime = None):
+                 bbox: list[int, int], 
+                 object_minimum_size_meters: float | int,
+                 object_maximum_size_meters: float | int,
+                 external_id: int | None = None 
+        ):
         """
         Initialize an ObjectAnnotation.
 
         Parameters
         ----------
-        object_code:
-            Code or type of the detected object.
-
-        bbox:
-            Bounding box of the object in image pixels.
-            Expected format: a list of [x, y] coordinate pairs.
-
         origin:
             Camera location as a Shapely Point.
             Point.x is longitude. Point.y is latitude.
+        
+
+        pic_azimuth:
+            Camera viewing direction in degrees.            
 
         pic_size_hor_px:
             Horizontal image size in pixels.
 
         pic_size_ver_px:
-            Vertical image size in pixels.
+            Vertical image size in pixels.            
 
         pic_field_of_view:
             Horizontal field of view of the image in degrees.
 
-        pic_azimuth:
-            Camera viewing direction in degrees.
+        bbox:
+            Bounding box of the object in image pixels.
+            Expected format: Polygon
 
-        picture_id:
-            Optional ID of the source picture.
+        object_minimum_size_meters:
+            Minimum expected size of the object.
+            Expected frormat float | int
 
-        annotation_id:
-            Optional ID of the source annotation.
+        object_maximum_size_meters:
+            Maximum expected size of the object.
+            Expected format float | int
 
-        picture_timestamp:
-            Optional timestamp when picture was made. Must be timestamp with timezone.
         """
                  
         # Assign a unique internal ID to this object annotation.
@@ -112,9 +110,9 @@ class ObjectAnnotation:
         ObjectAnnotation.__next_id += 1
 
         # Validate object_code.
-        if not isinstance(object_code, str):
-            raise TypeError("object_code must be a string.")
-        self.__object_code = object_code
+        # if not isinstance(object_code, str):
+        #     raise TypeError("object_code must be a string.")
+        # self.__object_code = object_code
 
         # Validate bbox.
         # It must be a list with at least 3 coordinate pairs.
@@ -155,26 +153,21 @@ class ObjectAnnotation:
             raise TypeError("pic_azimuth must be a number (int or a float).")
         self.__pic_azimuth = pic_azimuth
 
-        # Validate optional picture ID.
-        if not isinstance(picture_id, str | None):
-            raise TypeError('picture_id must be a string or None')
-        self.__picture_id = picture_id
 
-        # Validate optional annotation ID.
-        if not isinstance(annotation_id, str | None):
-            raise TypeError('annotation_id must be a string or None')
-        self.__object_annotation_id = annotation_id
+        # Validate the minimum object size in meters.
+        if not isinstance(object_minimum_size_meters, (int, float)):
+            raise TypeError("object_minimum_size_meters must be a number (int or a float).")
+        self.__min_object_size_m = object_minimum_size_meters
 
-        # Validate optional picture_timestamp.
-        if picture_timestamp is not None:
-            if picture_timestamp.tzinfo is None or picture_timestamp.utcoffset() is None:
-                raise ValueError("picture_timestamp must be timezone-aware")
-        self.__picture_timestamp = picture_timestamp        
+        # Validate the maximum object size in meters.
+        if not isinstance(object_maximum_size_meters, (int, float)):
+            raise TypeError("object_maximum_size_meters must be a number (int or a float).")
+        self.__max_object_size_m = object_maximum_size_meters
 
-        # Minimum and maximum real-world object size in metres.
-        # These values are needed to calculate the possible object location line.
-        self.__min_object_size_m = None
-        self.__max_object_size_m = None        
+
+        if external_id is not None and not isinstance(external_id, int):
+            raise TypeError("external_id must be a int")
+        self.__external_id = external_id
 
         # Observer list.
         # Other objects, such as Intersection objects, can subscribe to changes.
@@ -227,6 +220,7 @@ class ObjectAnnotation:
         self.__direction_deg = self.__calculate_direction_deg()
         self.__size_deg = self.__calculate_size_deg()
         self.__line = self.__calculate_line()
+        
 
 
 
@@ -237,14 +231,14 @@ class ObjectAnnotation:
         Changing this value affects the possible object location line.
         Therefore the annotation is marked as stale and observers are notified.
         """
-        if not isinstance(min_object_size_m, float):
+        if not isinstance(min_object_size_m, int | float):
             raise TypeError("min object size must be a float.")
         self.__is_stale = True
         self.__min_object_size_m = min_object_size_m
         self.__notify_observers()
         
 
-    def set_max_object_size(self, max_object_size_m: float)-> None:
+    def set_max_object_size(self, max_object_size_m: int |float)-> None:
         """
         Set the maximum real-world object size in metres.
 
@@ -261,28 +255,13 @@ class ObjectAnnotation:
         """Return the internal unique ID of this object annotation."""
         return self.__id
 
-    def get_object_code(self)->str:
-        """Return the object code."""
-        return self.__object_code
-
-    def get_picture_id(self)-> str | None:
-        """Return the source picture ID, if available."""
-        return self.__picture_id
-
-    def get_object_annotation_id(self)-> str | None:
-        """Return the source annotation ID, if available."""
-        return self.__object_annotation_id
-
-    def get_picture_timestamp(self)-> datetime | None:
-        return self.__picture_timestamp
-
     def print(self)-> None:
         """
         Print a short debug representation of this object annotation.
 
         This includes the internal ID, object code, bbox, origin and calculated line.
         """
-        print(f'object_id: {self.__id}, object_code: {self.__object_code} bbox: {self.__bbox}, origin: {self.__origin}, line:{self.get_line()}')
+        print(f'object_id: {self.__id}, bbox: {self.__bbox}, origin: {self.__origin}, line:{self.get_line()}')
 
     def object_x_min_px(self)-> int:
         """Return the minimum x-coordinate of the bbox in pixels."""
@@ -324,7 +303,7 @@ class ObjectAnnotation:
             x_loc_px = (self.object_x_min_px() + self.object_x_max_px()) / 2 - self.__pic_size_hor_px/ 2
     
         # Normalize the centre pixel to the image range.
-        return x_loc_px % (self.__pic_size_hor_px - 1)
+        return x_loc_px % (self.__pic_size_hor_px)
 
 
     def __calculate_direction_deg(self)-> float:
@@ -341,8 +320,9 @@ class ObjectAnnotation:
         float
             Absolute compass bearing in degrees, in the range [0, 360).
         """
+
         # Pixel distance from the image centre.
-        delta_px = self.x_center_px() - (0.5 * self.__pic_size_hor_px) + 1
+        delta_px = self.x_center_px() - (0.5 * self.__pic_size_hor_px)
 
         # Convert pixel offset to angular offset.
         delta_deg = (delta_px / self.__pic_size_hor_px) * self.__pic_field_of_view
@@ -423,6 +403,7 @@ class ObjectAnnotation:
 
         # Convert both distances to geographic endpoints and connect them.
         return LineString([self.calculate_endpoint(distance_min), self.calculate_endpoint(distance_max)])
+        
 
     def get_line(self) -> LineString | None:
         """
@@ -440,6 +421,8 @@ class ObjectAnnotation:
             self.__calculate_properties()        
         return self.__line
 
+    def get_external_id(self) -> int | None:
+        return self.__external_id
     
     # Now that the data comes directly from Panoramax, the field of view can be
     # used directly in the distance calculation.
@@ -601,29 +584,19 @@ class ObjectAnnotation:
 
         # Distance cannot be calculated when no line is available.
         if line is None:
-            raise ValueError("LineString is None, cannot calculate distance.")            
-        
-        # Start with infinity so every real distance will be smaller.
-        min_dist = float('inf')
+            raise ValueError("LineString is None, cannot calculate distance.")   
 
-        # Coordinates are expected as [(lon0, lat0), (lon1, lat1), ...].
-        coords = list(line.coords)  # e.g. [(lon0,lat0), (lon1,lat1), ...]
 
-        # Check each segment of the line.
-        for i in range(len(coords) - 1):
-            seg = LineString([coords[i], coords[i + 1]])
+        # Local flat-earth scale around the query point (metres per degree).
+        # works wel for this type of problems.
+        m_per_deg = math.radians(1.0) * tsgcf.EARTH_RADIUS_M
+        kx = m_per_deg * math.cos(math.radians(point.y))   # east-west
+        ky = m_per_deg                                      # north-south
 
-            # Find the nearest point on this segment.
-            nearest = seg.interpolate(seg.project(point))   # closest point on segment
-
-            # Calculate geodesic distance in metres.
-            # geopy expects coordinates as (latitude, longitude).
-            dist = geodesic((point.y, point.x), (nearest.y, nearest.x)).meters
-
-            # Keep the smallest distance found.
-            min_dist = min(min_dist, dist)
-
-        return min_dist
+        local_line = LineString(
+            [((x - point.x) * kx, (y - point.y) * ky) for x, y in line.coords]
+        )
+        return local_line.distance(Point(0.0, 0.0))
 
 
 class Intersection:
@@ -749,8 +722,7 @@ class Intersection:
         """
 
         # Only recalculate if the cached values are stale.
-        if self.__is_stale:
-            self.__is_stale = False
+        if self.__is_stale:            
 
             # Get the possible object location lines from both annotations.
             line1 = self.__annotation1.get_line()
@@ -791,6 +763,8 @@ class Intersection:
                 a2 = self.__annotation2.direction_deg()
                 diff = abs(a1 - a2)
                 self.__angle_between_lines = min(diff, 360 - diff)
+
+            self.__is_stale = False
 
             return None
             
@@ -1226,9 +1200,6 @@ class Cluster:
     # Class-level counter used to assign a unique internal ID to each cluster.
     __next_id = 0
 
-    # Earth radius is now read from the configuration file.
-    # __earth_radius_m = 6_371_000
-
     def __init__(self)->None:
         """
         Initialize an empty Cluster.
@@ -1245,10 +1216,10 @@ class Cluster:
         # Note: this is used as a dictionary, with:
         # key   = intersection ID
         # value = Intersection object
-        self.__intersections: list[Intersection] = {}
+        self.__intersections: dict[int, Intersection] = {}
 
 
-    def get_id(self)->None:
+    def get_id(self)->int:
         """Return the internal unique ID of this cluster."""
         return self.__id
 
@@ -1275,9 +1246,6 @@ class Cluster:
         # Validate that the Intersection has a valid point geometry.
         if not isinstance(intersection.intersection(), Point):
             raise TypeError("Not a valid intersection")
-
-        # Use the intersection ID as dictionary key.
-        intersection_id = intersection.get_id()
 
         # Store the Intersection in the cluster.
         intersection_id = intersection.get_id()
@@ -1401,8 +1369,12 @@ class Cluster:
         np.ndarray
             Coordinates converted from degrees to radians.
         """
-
-        return np.radians(self.get_coordinates())
+        """Coordinates in radians, ordered (lat, lon) as haversine functions expect."""
+        coords = self.get_coordinates()
+        if coords.size == 0:
+            return coords
+        return np.radians(coords[:, ::-1])
+        # return np.radians(self.get_coordinates())
          
 
     def get_max_distance_intersection_center_rad(self) -> float:
@@ -1482,27 +1454,33 @@ class Cluster:
             Cluster quality score.
         """
 
+        amount_intersections = self.amount_intersections()
+
+        if amount_intersections <= 1:
+            return 0.0
+
+        # Count the unique object annotations that contributed to this cluster.
+        obj_anno_count = len(self.get_object_annotations())
+
         # Calculate spatial density score of the intersection points.
         density_score = self.kde_density()
  
-        # Count the unique object annotations that contributed to this cluster.
-        obj_anno_count = len(self.get_object_annotation())
 
         # Calculate the theoretical maximum number of line-pair intersections.
         # Avoid division by zero when the cluster has fewer than two annotations.
         max_pairs = 0.5 * obj_anno_count * (obj_anno_count - 1)
 
         # Ratio between observed intersections and theoretical maximum intersections.
-        points_score = self.amount_intersections() / max_pairs if max_pairs > 0 else 0.0
+        points_score = amount_intersections / max_pairs if max_pairs > 0 else 0.0
  
         # Combine the score components.
-        score = points_score * density_score * math.log10(self.amount_intersections())
+        score = points_score * density_score * math.log10(amount_intersections)
  
         return score
 
 
 
-    def get_object_annotation(self) -> list[ObjectAnnotation]:
+    def get_object_annotations(self) -> list[ObjectAnnotation]:
         """
         Return all unique ObjectAnnotation objects used in this cluster.
 
@@ -1542,23 +1520,23 @@ class Cluster:
         """
 
         # Get all unique object annotations in this cluster.
-        lst_obj_anno = self.get_object_annotation()
+        lst_obj_anno = self.get_object_annotations()
 
         # Collect the viewing direction of each object annotation.
-        line_direction: float = []
+        lst_line_direction: list[float] = []
         for obj_anno in lst_obj_anno:
-            line_direction.append(obj_anno.direction_deg())
+            lst_line_direction.append(obj_anno.direction_deg())
 
         # No directions means no average can be calculated.
-        if not line_direction:
+        if len(lst_line_direction) < 1:
             return None
 
         # Calculate circular mean and normalize to [0, 360).
-        return (circmean(line_direction, high=360, low=0).item())% 360
+        return (circmean(lst_line_direction, high=360, low=0).item())% 360
 
-    def get_perpendicular(self) -> float | None:
+    def get_azimuth(self) -> float | None:
         """
-        Return the direction perpendicular to the average viewing direction.
+        Return the direction azimuth to the average viewing direction.
 
         Returns
         -------
@@ -1566,9 +1544,12 @@ class Cluster:
             Direction in degrees.
         """
 
-        # Add 180 degrees to get the opposite/perpendicular direction and
+        # Add 180 degrees to get the opposite/azimuth direction and
         # normalize to [0, 360).
-        return (self.__calculate_view_direction() + 180)% 360
+        vd = self.__calculate_view_direction()
+        if vd is not None:
+            return None
+        return (vd + 180)% 360
 
 
     def get_object_size(self) -> tuple[float | None, float | None]:
@@ -1591,7 +1572,7 @@ class Cluster:
         """
 
         # Get all unique object annotations in this cluster.
-        lst_obj_anno = self.get_object_annotation()
+        lst_obj_anno = self.get_object_annotations()
 
         # Store object size estimates.
         object_sizes: list[float] = []
@@ -1599,14 +1580,18 @@ class Cluster:
         # Estimate object size for each annotation at the cluster centre.
         for obj_anno in lst_obj_anno:
             size = obj_anno.object_size_m(self.get_center())
-            if size is not None:
-                object_sizes.append(obj_anno.object_size_m(self.get_center()))
+            # if size is not None:
+            object_sizes.append(obj_anno.object_size_m(self.get_center()))
 
         # Calculate mean and sample standard deviation if enough annotations exist.
-        if len(lst_obj_anno) >= 2:
+        if len(object_sizes) >= 2:
             size = float(np.mean(object_sizes))
             size_sd = float(np.std(object_sizes, ddof=1))
             return size, size_sd
+
+        if len(object_sizes) == 1:
+            size = float(np.mean(object_sizes))
+            return size, None
 
         return None, None
 
@@ -1644,7 +1629,8 @@ class Cluster:
             for j in range(i + 1, n):
                 # haversine() expects coordinates and returns kilometres.
                 # Multiplication by 1000 converts kilometres to metres.
-                distance_m = haversine(points[i], points[j]) * 1000
+                # distance_m = haversine(points[i], points[j]) * 1000
+                distance_m = haversine(points[i][::-1], points[j][::-1]) * 1000
 
                 # Add Gaussian kernel value for this pair distance.
                 density += self.gaussian_kernel(distance_m, h=0.5)
@@ -1678,13 +1664,13 @@ class Cluster:
         return (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * (d / h) ** 2)
 
     @staticmethod
-    def funct_cluster(
-        cluster: 'Cluster',
+    def split_cluster(
+        parent_cluster: 'Cluster',
         max_radius_m: float = 3,
         epsilon: float = 1.5,
         epsilon_decrease: float = .75,
-        max_dept: int = 1,
-        current_dept: int = 1,
+        max_depth: int = 1,
+        current_depth: int = 1,
         min_samples: int = 1,
     ) -> list['Cluster']:
         """
@@ -1716,7 +1702,7 @@ class Cluster:
 
         Parameters
         ----------
-        cluster:
+        parent_cluster:
             Cluster to split or accept.
 
         max_radius_m:
@@ -1730,10 +1716,10 @@ class Cluster:
         epsilon_decrease:
             Factor used to reduce epsilon at each recursion level.
 
-        max_dept:
+        max_depth:
             Maximum recursion depth.
 
-        current_dept:
+        current_depth:
             Current recursion depth. Callers normally leave this at 1.
 
         min_samples:
@@ -1745,37 +1731,37 @@ class Cluster:
             Final list of accepted clusters.
         """
 
-        # logger.info(f"start cluster, epsilo: {epsilon}, current_dept: {current_dept}, intersection count: {cluster.amount_intersections()}")
-
         # List to collect clusters found at this recursion level.
         cluster_lst : list[Cluster] = []
 
+        # If all points are already close enough to the centre, keep this cluster.
+        if parent_cluster.get_max_distance_intersection_center_m() < max_radius_m:
+            # All points are already within the acceptable radius → single cluster.
+            cluster_lst.append(parent_cluster)
+            return cluster_lst
+
         # --- Base case: maximum depth reached ---------------------------------- #
-        if current_dept > max_dept:
-            cluster_lst.append(cluster)
-            logger.warning(f"max depth reached; returning cluster {cluster.get_id()} ({cluster.amount_intersections()} pts)")
+        if current_depth > max_depth:
+            cluster_lst.append(parent_cluster)
+            logger.warning(f"max depth reached; returning cluster {parent_cluster.get_id()} ({parent_cluster.amount_intersections()} pts)")
             return cluster_lst
     
         # Increase recursion depth for child calls.
-        current_dept += 1
+        current_depth += 1
 
-        # If all points are already close enough to the centre, keep this cluster.
-        if cluster.get_max_distance_intersection_center_m() < max_radius_m:
-            # All points are already within the acceptable radius → single cluster.
-            cluster_lst.append(cluster)
-            return cluster_lst
+
     
         # --- DBSCAN clustering ------------------------------------------------- #
 
         # Get coordinates and intersections.
         # These lists are expected to have the same order and length.
-        coordinates_rad = cluster.get_coordinates_rad()
-        intersections = cluster.get_intersections()
+        coordinates_rad = parent_cluster.get_coordinates_rad()
+        intersections = parent_cluster.get_intersections()
 
         # Create DBSCAN clusterer.
         # eps is converted from metres to radians for the haversine metric.
         clusterer = DBSCAN(
-            eps=epsilon*2*math.pi/tsgcf.EARTH_RADIUS_M,
+            eps=epsilon/tsgcf.EARTH_RADIUS_M,
             min_samples=min_samples,
             metric="haversine",
             algorithm="ball_tree",
@@ -1787,7 +1773,7 @@ class Cluster:
 
         # Create new clusters for each DBSCAN label.
         # Label -1 is DBSCAN noise and is excluded.
-        unique_labels = set(labels) - {-1}    
+        unique_labels = set(labels) - {-1}
         
         for label in unique_labels:
             new_cluster = Cluster()
@@ -1802,11 +1788,7 @@ class Cluster:
     
         # Sort clusters by quality score.
         # Highest scoring clusters are processed first during conflict resolution.
-        clusters_sorted = sorted(
-            cluster_lst,
-            key=lambda cluster: cluster.score_cluster(),
-            reverse=True
-        )
+        clusters_sorted = sorted(cluster_lst, key=lambda cl: cl.score_cluster(), reverse=True)
 
         # --- Conflict resolution ----------------------------------------------- #
         # Each bearing line may be assigned to at most one cluster.
@@ -1814,11 +1796,12 @@ class Cluster:
         # clusters claim their lines first.
         line_to_cluster: dict[int, int] = {}
     
-        for cluster in clusters_sorted:
-            cluster_id = cluster.get_id()
-
+        for candidate in clusters_sorted:
+            cluster_id = candidate.get_id()
             # Loop through all intersections in this cluster.
-            for inters in cluster.get_intersections():
+            for inters in candidate.get_intersections():
+            
+            # for inters in cluster.get_intersections():
 
                 # Get the IDs of the two ObjectAnnotation lines that form this intersection.
                 id_a, id_b = inters.get_annotation1().get_id(), inters.get_annotation2().get_id()
@@ -1829,17 +1812,14 @@ class Cluster:
 
                 # Remove the intersection from this cluster if it conflicts.
                 if conflict_a or conflict_b:
-                    cluster.remove_intersection(inters)
-    
-                # Mark both lines as claimed by this cluster.
-                line_to_cluster[id_a] = cluster_id
-                line_to_cluster[id_b] = cluster_id
+                    candidate.remove_intersection(inters)
+                else:
+                    # Mark both lines as claimed by this cluster.
+                    line_to_cluster[id_a] = cluster_id
+                    line_to_cluster[id_b] = cluster_id
     
         # Remove clusters that fall below the minimum size requirement.
-        clusters_filtered = [
-            cluster for cluster in clusters_sorted
-            if cluster.amount_intersections() >= min_samples
-        ]
+        clusters_filtered = [cl for cl in clusters_sorted if cl.amount_intersections() >= min_samples]
 
         # Stop if no valid clusters remain.
         if not clusters_filtered:
@@ -1854,9 +1834,9 @@ class Cluster:
         # Collect final clusters from recursive calls.
         cluster_result_lst : list[Cluster] = []
 
-        for cluster in clusters_filtered:
-            cluster_result_lst.extend(Cluster.funct_cluster(
-                cluster, max_radius_m, epsilon, epsilon_decrease, max_dept, current_dept, min_samples))
+        for child_cluster in clusters_filtered:
+            cluster_result_lst.extend(Cluster.split_cluster(
+                child_cluster, max_radius_m, epsilon, epsilon_decrease, max_depth, current_depth, min_samples))
 
         return cluster_result_lst    
 
@@ -1874,7 +1854,7 @@ class Centroid:
     - its location;
     - the estimated object size;
     - the object size standard deviation;
-    - the viewing/perpendicular direction;
+    - the viewing/azimuth direction;
     - source picture and annotation IDs.
     """
 
@@ -1992,7 +1972,7 @@ class Centroid:
         size, _ =  self.__original_cluster.get_object_size()
         return size
 
-    def get_object_size_sd(self)->tuple[float | None, float | None]:
+    def get_object_size_sd(self)->float | None:
         """
         Return the standard deviation of the estimated object size.
 
@@ -2007,106 +1987,17 @@ class Centroid:
         _, size_sd =  self.__original_cluster.get_object_size()
         return size_sd
 
-    def get_perpendicular(self)->float:
+    def get_azimuth(self)->float:
         """
-        Return the perpendicular direction calculated from the original cluster.
+        Return the azimuth direction calculated from the original cluster.
 
         Returns
         -------
         float
             Direction in degrees.
         """
-        return self.__original_cluster.get_perpendicular()
+        return self.__original_cluster.get_azimuth()
 
-    def get_object_annotation_id(self)->str:
-        """
-        Return the annotation ID of the first assigned ObjectAnnotation.
-
-        This assumes that at least one ObjectAnnotation is assigned.
-
-        Returns
-        -------
-        str
-            Source annotation ID.
-        """
-        return self.__lst_object_annotation[0].get_object_annotation_id()
-
-    def get_picture_id(self)->str:
-        """
-        Return the picture ID of the first assigned ObjectAnnotation.
-
-        This assumes that at least one ObjectAnnotation is assigned.
-
-        Returns
-        -------
-        str
-            Source picture ID.
-        """
-        return self.__lst_object_annotation[0].get_picture_id()
-
-    # def add_valid_object_annotations(self, list_object_annotation: list[ObjectAnnotation], MAX_CLUSTER_RADIUS_M):
-    #     # Note for future improvement.
-    #     # Possible recalculate new centre.
-    #     # Possible add line score to line so best line can be selected.
-
-    #     tree = STRtree([obj_anna.get_line() for obj_anna in list_object_annotation])
-
-    #     DEGREE_BUFFER = MAX_CLUSTER_RADIUS_M * 360 / (EARTH_RADIUS_M * 2 * math.pi)
-
-    #     p = self.get_center()
-
-    #     # Coarse filter: bounding box in degrees around the centroid.
-    #     search_box = box(
-    #         p.x - DEGREE_BUFFER, p.y - DEGREE_BUFFER,
-    #         p.x + DEGREE_BUFFER, p.y + DEGREE_BUFFER
-    #     )
-    #     candidate_indices = tree.query(search_box)          # returns indices into line_geoms
-    #     candidates = [list_object_annotation[i] for i in candidate_indices]
-
-    #     # Fine filter: exact geodesic distance for each candidate.
-    #     for obj_anna in candidates:
-    #         dist = obj_anna.min_distance_to_line_m(p)
-    #         if dist <= MAX_CLUSTER_RADIUS_M:
-    #             self.add_object_annotation(obj_anna)
-
-    #     return None
-
-    def get_lst_object_annotation(self) -> list[ObjectAnnotation]:
-        """
-        Return all ObjectAnnotation objects assigned to this centroid.
-
-        This method returns the same internal list as get_object_annotations().
-
-        Returns
-        -------
-        list[ObjectAnnotation]
-            List of assigned object annotations.
-        """
-        return self.__lst_object_annotation
-
-
-    # Possible handy for the future, not in use at the moment.
-    def update_links_and_sizes(self) -> None:
-        """
-        Update the link and size fields for all object annotations in this cluster.
-
-        This method is not currently used.
-
-        The link points to the Panoramax endpoint with the annotation ID and
-        picture ID as query parameters.
-        """
-
-        # Loop through assigned object annotations.
-        for obj_anna in self._object_annotations:
-
-            # Build a Panoramax link for the object annotation.
-            obj_anna.link = (
-                f"{tsgcf.PANORAMAX_END_POINT}"
-                f"?annot={obj_anna.get_object_annotation_id()}&pic={obj_anna.get_picture_id()}"
-            )
-
-            # Store the calculated object size on the object annotation.
-            obj_anna.size = obj_anna.get_object_size()
 
     @staticmethod
     def add_valid_object_annotations_all_centroids(
@@ -2277,11 +2168,11 @@ class Centroid:
             # Quality score of the original cluster behind this centroid.
             cluster_score = centroid.get_original_cluster().score_cluster()
             
-            for obj_anna in centroid.get_lst_object_annotation():
+            for obj_anna in centroid.get_object_annotations():
                 # Calculate distance score.
                 # A smaller distance gives a higher score.
                 distance = obj_anna.min_distance_to_line_m(centroid.get_center())
-                distance_score = (1 - distance / MAX_CLUSTER_RADIUS_M) ** 2
+                distance_score = (1 - max(0.0, 1 - distance / MAX_CLUSTER_RADIUS_M)) ** 2
 
                 # Calculate size score.
                 # This compares the centroid object size with the object size
@@ -2309,7 +2200,7 @@ class Centroid:
             new_centroid = Centroid(centroid.get_original_cluster())
 
             # Add only annotations for which this centroid is the winning centroid.
-            for obj_anna in centroid.get_lst_object_annotation():
+            for obj_anna in centroid.get_object_annotations():
                 best_centroid_id, _ = best_centroid_per_annotation.get(obj_anna.get_id(), (None, -1))
                 if best_centroid_id == centroid.get_id():
                     new_centroid.add_object_annotation(obj_anna)

@@ -1,7 +1,7 @@
 # Standard library
 import logging
 import math
-from datetime import datetime
+# from datetime import datetime
 
 # Third-party geospatial and numerical libraries
 import geopandas as gpd
@@ -22,13 +22,14 @@ from shapely.ops import transform
 from sklearn.cluster import DBSCAN
 from sklearn.metrics.pairwise import haversine_distances
 
-# Local configuration values from .env / config module
-import tisgrade_config as tsgcf
-
 
 # Module-level logger.
 # This creates a logger name like: tisgrade.tisgrade_classes
-logger = logging.getLogger(f"tisgrade.{__name__}")
+# logger = logging.getLogger(f"tisgrade.{__name__}")
+logger = logging.getLogger(__name__) 
+
+EARTH_RADIUS_M = 6_357_009
+
 
 # ===========================================================================
 # Classes
@@ -280,9 +281,9 @@ class ObjectAnnotation:
         return max(p[1] for p in self.__bbox)
 
     def x_center_px(self) -> float:
-        """Return the horizontal centre pixel of a sign, accounting for wrap-around.
+        """Return the horizontal centre pixel of object, accounting for wrap-around.
     
-        Panoramic images wrap horizontally. When the two edge pixels of a sign
+        Panoramic images wrap horizontally. When the two edge pixels of a object
         straddle the 0°/360° seam, a naive average would place the centre on the
         wrong side of the image. This function detects that case and corrects for
         it.
@@ -589,7 +590,7 @@ class ObjectAnnotation:
 
         # Local flat-earth scale around the query point (metres per degree).
         # works wel for this type of problems.
-        m_per_deg = math.radians(1.0) * tsgcf.EARTH_RADIUS_M
+        m_per_deg = math.radians(1.0) * EARTH_RADIUS_M
         kx = m_per_deg * math.cos(math.radians(point.y))   # east-west
         ky = m_per_deg                                      # north-south
 
@@ -1419,7 +1420,7 @@ class Cluster:
         """
 
         # Convert radians to metres by multiplying with Earth radius.
-        return self.get_max_distance_intersection_center_rad()*tsgcf.EARTH_RADIUS_M
+        return self.get_max_distance_intersection_center_rad()*EARTH_RADIUS_M
 
 
     def score_cluster(self) -> float:
@@ -1547,7 +1548,7 @@ class Cluster:
         # Add 180 degrees to get the opposite/azimuth direction and
         # normalize to [0, 360).
         vd = self.__calculate_view_direction()
-        if vd is not None:
+        if vd is None:
             return None
         return (vd + 180)% 360
 
@@ -1761,7 +1762,7 @@ class Cluster:
         # Create DBSCAN clusterer.
         # eps is converted from metres to radians for the haversine metric.
         clusterer = DBSCAN(
-            eps=epsilon/tsgcf.EARTH_RADIUS_M,
+            eps=epsilon/EARTH_RADIUS_M,
             min_samples=min_samples,
             metric="haversine",
             algorithm="ball_tree",
@@ -2168,21 +2169,24 @@ class Centroid:
             # Quality score of the original cluster behind this centroid.
             cluster_score = centroid.get_original_cluster().score_cluster()
             
-            for obj_anna in centroid.get_object_annotations():
+            for obj_anno in centroid.get_object_annotations():
                 # Calculate distance score.
                 # A smaller distance gives a higher score.
-                distance = obj_anna.min_distance_to_line_m(centroid.get_center())
-                distance_score = (1 - max(0.0, 1 - distance / MAX_CLUSTER_RADIUS_M)) ** 2
+                distance = obj_anno.min_distance_to_line_m(centroid.get_center())
+                distance_score = (max(0.0, 1 - distance / MAX_CLUSTER_RADIUS_M)) ** 2
 
                 # Calculate size score.
                 # This compares the centroid object size with the object size
                 # estimated from this annotation at the centroid location.
-                object_size = obj_anna.object_size_m(centroid.get_center())
+                object_size = obj_anno.object_size_m(centroid.get_center())
                 size_score = object_size_score(centroid_size, object_size)
 
                 # Combine all score parts into one total score.
                 total_score = distance_score * size_score * cluster_score
-                score_map[(centroid.get_id(), obj_anna.get_id())] = total_score
+                score_map[(centroid.get_id(), obj_anno.get_id())] = total_score
+
+                # if obj_anno.get_id() == 73:
+                #     print(f'anno id: {obj_anno.get_id()},cent id: {centroid.get_id()}, distance: {distance}, distance_score: {distance_score}, size_score: {size_score} ')
 
         # Step 2: Select the best centroid for each ObjectAnnotation.
         best_centroid_per_annotation = {}  # {obj_anna_id: (best_centroid_id, best_score)}
@@ -2198,6 +2202,7 @@ class Centroid:
         for centroid in lst_centroid:
             # Create a new centroid based on the same original cluster.
             new_centroid = Centroid(centroid.get_original_cluster())
+            # print(f'old id: {centroid.get_id()} new id: {new_centroid.get_id()}')
 
             # Add only annotations for which this centroid is the winning centroid.
             for obj_anna in centroid.get_object_annotations():

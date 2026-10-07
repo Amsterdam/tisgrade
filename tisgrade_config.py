@@ -101,83 +101,135 @@ PANORAMAX_END_POINT     = os.environ["PANORAMAX_END_POINT"]
 # Earth radius in metres.
 # Used for distance calculations, for example converting radians to metres.
 EARTH_RADIUS_M          = int(os.environ["EARTH_RADIUS_M"])
+APP_LOGGER_NAMES = ("tisgrade", "triangulation")
+
+
+# def setup_logging(debug=False):
+#     """
+#     Configure logging for the entire application.
+
+#     This function:
+#     - creates a log directory if it does not exist;
+#     - creates a timestamped log file;
+#     - configures the main "tisgrade" logger;
+#     - writes logs to a file;
+#     - also writes logs to the console when debug=True;
+#     - suppresses noisy logs from selected third-party packages.
+
+#     Parameters
+#     ----------
+#     debug:
+#         If True, set log level to DEBUG and add console logging.
+#         If False, set log level to INFO and log only to file.
+
+#     Returns
+#     -------
+#     logging.Logger
+#         Configured application logger.
+#     """
+
+#     # Create the log directory next to this Python file.
+#     log_dir = Path(__file__).parent / "log"
+#     log_dir.mkdir(exist_ok=True)
+
+#     # Create a unique log filename with a timestamp.
+#     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+#     log_file = log_dir / f"app_{timestamp}.log"
+
+#     # Get the application-level logger.
+#     # Other modules can use child loggers such as "tisgrade.module_name".
+#     logger = logging.getLogger("tisgrade")
+
+#     # Use DEBUG level in debug mode, otherwise INFO.
+#     logger.setLevel(logging.DEBUG if debug else logging.INFO)
+
+#     # Clear any existing handlers.
+#     # This prevents duplicate log messages when setup_logging() is called again.
+#     for h in logger.handlers:
+#         h.close()
+#     logger.handlers.clear()
+
+#     # Prevent messages from also being passed to the root logger.
+#     logger.propagate = False
+
+
+#     # Define the format used for all log messages.
+#     formatter = logging.Formatter(
+#         "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+#         datefmt="%Y-%m-%d %H:%M:%S"
+#     )
+
+#     # Create a file handler so logs are written to the timestamped log file.
+#     file_handler = logging.FileHandler(log_file)
+#     file_handler.setFormatter(formatter)
+#     logger.addHandler(file_handler)
+
+#     # In debug mode, also write log messages to the console.
+#     if debug:
+#         console_handler = logging.StreamHandler()
+#         console_handler.setFormatter(formatter)
+#         logger.addHandler(console_handler)
+
+#     # Reduce noise from third-party libraries.
+#     # These libraries can otherwise produce many INFO or DEBUG messages.
+#     logging.getLogger('numba').setLevel(logging.WARNING)
+#     logging.getLogger('pyogrio').setLevel(logging.WARNING)
+
+#     # Log where the log file is stored.
+#     logger.info("Logging initialized. Log file: %s", log_file)
+
+#     return logger
 
 
 def setup_logging(debug=False):
-    """
-    Configure logging for the entire application.
-
-    This function:
-    - creates a log directory if it does not exist;
-    - creates a timestamped log file;
-    - configures the main "tisgrade" logger;
-    - writes logs to a file;
-    - also writes logs to the console when debug=True;
-    - suppresses noisy logs from selected third-party packages.
-
-    Parameters
-    ----------
-    debug:
-        If True, set log level to DEBUG and add console logging.
-        If False, set log level to INFO and log only to file.
-
-    Returns
-    -------
-    logging.Logger
-        Configured application logger.
-    """
-
-    # Create the log directory next to this Python file.
     log_dir = Path(__file__).parent / "log"
     log_dir.mkdir(exist_ok=True)
 
-    # Create a unique log filename with a timestamp.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = log_dir / f"app_{timestamp}.log"
 
-    # Get the application-level logger.
-    # Other modules can use child loggers such as "tisgrade.module_name".
-    logger = logging.getLogger("tisgrade")
+    level = logging.DEBUG if debug else logging.INFO
 
-    # Use DEBUG level in debug mode, otherwise INFO.
-    logger.setLevel(logging.DEBUG if debug else logging.INFO)
-
-    # Clear any existing handlers.
-    # This prevents duplicate log messages when setup_logging() is called again.
-    for h in logger.handlers:
-        h.close()
-    logger.handlers.clear()
-
-    # Prevent messages from also being passed to the root logger.
-    logger.propagate = False
-
-
-    # Define the format used for all log messages.
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Create a file handler so logs are written to the timestamped log file.
+    # One set of handlers, shared by every logger below.
+    handlers: list[logging.Handler] = []
+
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    handlers.append(file_handler)
 
-    # In debug mode, also write log messages to the console.
     if debug:
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
+        handlers.append(console_handler)
+
+    for name in APP_LOGGER_NAMES:
+        lg = logging.getLogger(name)
+        lg.setLevel(level)
+        lg.propagate = False
+
+        # Remove old handlers so repeated calls don't duplicate output.
+        # This also removes the package's NullHandler, which is fine because
+        # real handlers are now attached.
+        for h in lg.handlers[:]:
+            h.close()
+            lg.removeHandler(h)
+
+        for h in handlers:
+            lg.addHandler(h)
 
     # Reduce noise from third-party libraries.
-    # These libraries can otherwise produce many INFO or DEBUG messages.
-    logging.getLogger('numba').setLevel(logging.WARNING)
-    logging.getLogger('pyogrio').setLevel(logging.WARNING)
+    logging.getLogger("numba").setLevel(logging.WARNING)
+    logging.getLogger("pyogrio").setLevel(logging.WARNING)
 
-    # Log where the log file is stored.
-    logger.info("Logging initialized. Log file: %s", log_file)
+    app_logger = logging.getLogger("tisgrade")
+    app_logger.info("Logging initialized. Log file: %s", log_file)
+    return app_logger
 
-    return logger
 
 
 def get_db_connection () -> "psycopg2.extensions.connection":
